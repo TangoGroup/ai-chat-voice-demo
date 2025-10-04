@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Mic, Square, Sun, Moon } from "lucide-react";
+import { Mic, Square, Sun, Moon, Speech } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import Visualizer from "@/components/Visualizer/Visualizer";
 import { useTheme } from "@/components/Theme/ThemeProvider";
+import { LiquidGlassButton } from "@/components/ui/liquid-glass-button";
 
 export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
@@ -114,6 +115,19 @@ export default function Home() {
   return (
     <div className="min-h-dvh w-full">
       <Visualizer />
+      <div className="fixed inset-x-0 z-50 flex justify-center bottom-12">
+        <LiquidGlassButton
+          aria-label={isRecording ? "Stop recording" : "Push to talk"}
+          onMouseDown={startRecording}
+          onMouseUp={stopRecording}
+          onTouchStart={startRecording}
+          onTouchEnd={stopRecording}
+          diameter={112}
+          active={isRecording}
+        >
+          {isRecording ? <Square className="h-6 w-6" /> : <Speech className="h-6 w-6" />}
+        </LiquidGlassButton>
+      </div>
       <div className="fixed top-4 right-4 z-50">
         <Button variant="secondary" size="icon" onClick={toggle} aria-label="Toggle theme">
           {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
