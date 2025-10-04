@@ -1,41 +1,43 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Mic, Square, Send } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Mic, Square } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 
-type MessageRole = "user" | "assistant";
-
-interface ChatMessage {
-  id: string;
-  role: MessageRole;
-  content: string;
-}
-
 export default function Home() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState<string>("");
+  const [logs, setLogs] = useState<string[]>([]);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const consoleRef = useRef<HTMLTextAreaElement | null>(null);
+  const [canRecord, setCanRecord] = useState<boolean>(false);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages.length]);
+    setCanRecord(typeof window !== "undefined" && "MediaRecorder" in window);
+  }, []);
 
-  const canRecord = useMemo(() => typeof window !== "undefined" && "MediaRecorder" in window, []);
+  useEffect(() => {
+    if (consoleRef.current) {
+      consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+    }
+  }, [logs.length]);
+
+  const appendLog = useCallback((message: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setLogs((prev) => [...prev, `[${timestamp}] ${message}`]);
+  }, []);
+
+  const clearLogs = useCallback(() => {
+    setLogs([]);
+  }, []);
 
   const startRecording = useCallback(async () => {
     if (!canRecord || isRecording) return;
     try {
+      appendLog("Requesting microphone access…");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -45,56 +47,94 @@ export default function Home() {
           audioChunksRef.current.push(event.data);
         }
       };
-      mediaRecorder.onstop = () => {
+      mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        // Placeholder: In a real app, send audioBlob to your STT backend
-        void audioBlob.arrayBuffer();
+        if (audioBlob.size === 0) {
+          appendLog("Recorded audio is empty. Skipping STT.");
+          return;
+        }
+        appendLog("Recording stopped. Transcribing with ElevenLabs…");
+        try {
+          const form = new FormData();
+          form.append("file", audioBlob, "audio.webm");
+          const sttResp = await fetch("/api/stt", {
+            method: "POST",
+            body: form,
+          });
+          appendLog(`STT response status: ${sttResp.status}`);
+          if (!sttResp.ok) {
+            appendLog("STT failed.");
+            return;
+          }
+          const sttData = (await sttResp.json()) as { transcription?: string; text?: string };
+          const transcribedText = (sttData?.transcription || sttData?.text || "").trim();
+          if (!transcribedText) {
+            appendLog("No transcription captured. Skipping AI call.");
+            return;
+          }
+          appendLog(`Transcribed: "${transcribedText}"`);
+          appendLog("Calling AI endpoint (stream=false)…");
+          const aiResp = await fetch("/api/generateAnswerStream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: transcribedText, stream: false }),
+          });
+          appendLog(`AI response status: ${aiResp.status}`);
+          const aiData = await aiResp.json();
+          const answerText = (aiData?.answer || aiData?.text || aiData?.message || JSON.stringify(aiData)) as string;
+          appendLog(`AI answer: ${typeof answerText === "string" ? answerText.slice(0, 120) : "[object]"}`);
+          appendLog("Calling ElevenLabs TTS…");
+          const ttsResp = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: answerText }),
+          });
+          appendLog(`TTS response status: ${ttsResp.status}`);
+          const audioBuf = await ttsResp.arrayBuffer();
+          const blob = new Blob([audioBuf], { type: "audio/mpeg" });
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          appendLog("Playing audio…");
+          void audio.play();
+        } catch (e) {
+          const err = e as Error;
+          appendLog(`Voice flow error: ${err.message}`);
+          console.error("Voice flow error", e);
+        }
       };
       mediaRecorder.start();
       setIsRecording(true);
+      appendLog("Recording started.");
     } catch (error) {
+      const err = error as Error;
+      appendLog(`Microphone access error: ${err.message}`);
       console.error("Microphone access error", error);
     }
-  }, [canRecord, isRecording]);
+  }, [appendLog, canRecord, isRecording]);
 
   const stopRecording = useCallback(() => {
     if (!isRecording || !mediaRecorderRef.current) return;
     mediaRecorderRef.current.stop();
     mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
     setIsRecording(false);
-  }, [isRecording]);
-
-  const sendText = useCallback(() => {
-    const trimmed = input.trim();
-    if (!trimmed) return;
-    const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: trimmed,
-    };
-    setMessages((prev) => [...prev, userMessage]);
-    setInput("");
-    // Placeholder: mock assistant reply
-    const assistantMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: "This is a placeholder assistant response.",
-    };
-    setTimeout(() => setMessages((prev) => [...prev, assistantMessage]), 500);
-  }, [input]);
+    appendLog("Stopping recording…");
+  }, [appendLog, isRecording]);
 
   return (
     <div className="min-h-dvh w-full flex items-center justify-center p-4 sm:p-6">
       <Card className="w-full max-w-2xl">
         <CardHeader>
-          <CardTitle>Voice Chat</CardTitle>
+          <CardTitle>Voice Chat Console</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <div className="flex items-center gap-3">
             <Button
               type="button"
               variant={isRecording ? "destructive" : "default"}
-              onClick={isRecording ? stopRecording : startRecording}
+              onMouseDown={startRecording}
+              onMouseUp={stopRecording}
+              onTouchStart={startRecording}
+              onTouchEnd={stopRecording}
               disabled={!canRecord}
             >
               {isRecording ? (
@@ -103,7 +143,7 @@ export default function Home() {
                 </>
               ) : (
                 <>
-                  <Mic className="h-4 w-4" /> Record
+                  <Mic className="h-4 w-4" /> Push to Talk
                 </>
               )}
             </Button>
@@ -111,43 +151,19 @@ export default function Home() {
             <div className="text-sm text-muted-foreground">
               {canRecord ? (isRecording ? "Recording…" : "Idle") : "Recording unsupported"}
             </div>
-          </div>
-
-          <div className="border rounded-md">
-            <ScrollArea className="h-[360px]">
-              <div ref={scrollRef} className="p-4 space-y-4">
-                {messages.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No messages yet.</div>
-                ) : (
-                  messages.map((m) => (
-                    <div key={m.id} className="flex items-start gap-3">
-                      <Avatar className="h-8 w-8">
-                        <AvatarFallback>{m.role === "user" ? "U" : "A"}</AvatarFallback>
-                      </Avatar>
-                      <div className="flex-1">
-                        <div className="text-xs text-muted-foreground mb-1">
-                          {m.role === "user" ? "You" : "Assistant"}
-                        </div>
-                        <div className="whitespace-pre-wrap text-sm">{m.content}</div>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </ScrollArea>
-          </div>
-
-          <div className="flex items-end gap-2">
-            <Textarea
-              placeholder="Type a message"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              className="min-h-[80px]"
-            />
-            <Button type="button" onClick={sendText} disabled={!input.trim()}>
-              <Send className="h-4 w-4" />
+            <div className="flex-1" />
+            <Button type="button" variant="secondary" onClick={clearLogs} disabled={logs.length === 0}>
+              Clear
             </Button>
           </div>
+
+          <Textarea
+            ref={consoleRef}
+            readOnly
+            value={logs.join("\n")}
+            placeholder="Logs will appear here…"
+            className="h-[360px] font-mono text-xs"
+          />
         </CardContent>
       </Card>
     </div>
