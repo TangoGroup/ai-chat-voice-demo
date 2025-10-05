@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+Always reference the project design notes in `DESIGN_NOTES.md` at the repository root when making decisions, writing code, or answering questions. Keep the notes up to date with goals, tasks, and key decisions. If information is missing, ask to clarify and propose updates to `DESIGN_NOTES.md`.

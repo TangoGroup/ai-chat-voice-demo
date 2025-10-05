@@ -37,4 +37,35 @@ Develop a voice chat POC using custom AI API endpoints, ElevenLabs (11L), and a 
   - Prefer streaming TTS if/when we hook Realtime; otherwise use non-WebSocket flow.
   - Upstream AI message endpoint remains SSE-capable; we can request non-stream JSON when coordinating TTS.
 
+### Logging Policy
+
+- All user-facing actions and key voice flow state changes MUST be logged to the in-app console.
+
+## State Machine (XState v5)
+
+### Regions
+- Control (sequential): `ready` → `listening_idle` → `capturing` → `processing` → `playing` → `listening_idle` | `error`.
+- VAD (parallel): `off` | `on`.
+
+VAD is `on` for all control states except `ready` and `error`.
+
+### Events
+- `START_LISTENING`, `STOP_ALL`
+- `VAD_SPEECH_START`, `VAD_SILENCE_TIMEOUT`
+- `RECORDING_STOPPED{ blob }`, `AUDIO_ENDED`
+
+### Policies
+- Speech start while `listening_idle` → `capturing` and start MediaRecorder.
+- Silence timeout while `capturing` → stop capture → `processing` with blob.
+- Speech start during `playing` or `processing` preempts: stop playback/pipeline, go to `capturing` and begin a new utterance.
+- Button: in `ready` starts listening; otherwise acts as stop (`STOP_ALL`).
+
+### Visualizer Mapping
+- `ready`/`error`: passive
+- `listening_idle`/`capturing`: listening
+- `processing`: thinking
+- `playing`: speaking
+  - Examples: mic access requests, recording start/stop, VAD start/stop, speech detected, silence detected, auto-stop triggers, STT request/response status, AI request/response status, TTS request status, audio playback start/end.
+  - Rationale: aids debugging, demo clarity, and post-run analysis.
+
 
