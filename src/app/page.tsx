@@ -61,14 +61,16 @@ export default function Home() {
   }, []);
 
   const stopRecording = useCallback(() => {
-    if (!mediaRecorderRef.current) {
+    const rec = mediaRecorderRef.current;
+    if (!rec) {
+      setIsRecording(false);
       appendLog("stopRecording: no active MediaRecorder");
       return;
     }
     try {
-      const state = (mediaRecorderRef.current as MediaRecorder).state;
+      const state = (rec as MediaRecorder).state;
       appendLog(`stopRecording: recorder.state=${state}`);
-      mediaRecorderRef.current.stop();
+      rec.stop();
     } catch {}
     mediaRecorderRef.current = null;
     setIsRecording(false);
@@ -405,7 +407,8 @@ export default function Home() {
   }, [vad.loading, vad.listening, vad.userSpeaking, vad.errored]);
 
   const startRecording = useCallback(async () => {
-    if (!canRecord || isRecording) return;
+    const currentState = mediaRecorderRef.current?.state;
+    if (!canRecord || currentState === "recording" || currentState === "paused") return;
     try {
       appendLog("Requesting microphone access…");
       // Always reuse the same stream instance managed by vad.getStream

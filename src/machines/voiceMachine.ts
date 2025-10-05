@@ -140,6 +140,7 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
           listening_idle: {
+            id: "control_listening_idle",
             entry: ["turnVadOn", "vizListening"],
             on: {
               STOP_ALL: { target: "ready", actions: "stopAll" },
@@ -149,16 +150,34 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
           },
           capturing: {
             entry: ["vizListening"],
+            initial: "recording",
+            states: {
+              recording: {
+                on: {
+                  VAD_SILENCE_TIMEOUT: { target: "stopping", actions: "stopCapture" },
+                },
+              },
+              stopping: {
+                // Safety net: if the recorder never fires onstop, avoid deadlock
+                after: {
+                  2000: { target: "#control_listening_idle" },
+                },
+                on: {
+                  RECORDING_STOPPED: {
+                    target: "#control_processing",
+                    actions: "storeRecordingBlob",
+                  },
+                },
+              },
+            },
             on: {
               STOP_ALL: { target: "ready", actions: "stopAll" },
-              VAD_SILENCE_TIMEOUT: { actions: "stopCapture" },
-              RECORDING_STOPPED: {
-                target: "processing",
-                actions: "storeRecordingBlob",
-              },
+              // Allow immediate retrigger during stopping to begin a new utterance
+              VAD_SPEECH_START: { target: ".recording", actions: ["stopPlayback", "startCapture"] },
             },
           },
           processing: {
+            id: "control_processing",
             entry: ["vizThinking"],
             on: {
               // Interrupt: immediately return to listening (keep VAD on)

@@ -107,6 +107,7 @@ VAD is `on` for all control states except `ready` and `error`.
 ### Policies
 - Speech start while `listening_idle` → `capturing` and start MediaRecorder. Also call `stopPlayback` to ensure no residual TTS.
 - Silence timeout while `capturing` → stop capture → `processing` with blob.
+- Robustness: `capturing` now has a `stopping` substate with a 2s timeout. If `MediaRecorder.onstop` never fires (e.g., if no active recorder), we auto-return to `listening_idle` to avoid deadlock. We also unconditionally clear the recording flag when stopping, even if no recorder is present.
 - Speech start during `playing` or `processing` preempts: stop playback/pipeline (including WS TTS and SSE), go to `capturing` and begin a new utterance.
 - Button: in `ready` starts listening; otherwise acts as stop (`STOP_ALL`).
 
