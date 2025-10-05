@@ -9,6 +9,10 @@ interface TtsRequestBody {
   modelId?: string;
 }
 
+/**
+ * DEPRECATED: Prefer ElevenLabs WebSocket TTS streaming.
+ * This REST endpoint remains for fallback and testing purposes.
+ */
 export async function POST(req: Request) {
   try {
     const { text, voiceId, modelId }: TtsRequestBody = await req.json();

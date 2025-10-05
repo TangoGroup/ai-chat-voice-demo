@@ -1,3 +1,6 @@
+# URGENT TODO!!!
+In order to use ElevenLabs websocket implementation, I had to use `NEXT_PUBLIC_ELEVENLABS_API_KEY`, i.e. expose the API key client-side. This is very suboptimal. What we need is an authenticated WS relay, but unfortunately Vercel doesn't really do that, so for this POC _security be darned!!!_
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started

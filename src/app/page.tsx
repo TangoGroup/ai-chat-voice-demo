@@ -1,15 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMicVAD } from "@ricky0123/vad-react";
 import { Square, Sun, Moon, Speech } from "lucide-react";
-import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import Visualizer from "@/components/Visualizer/Visualizer";
 import { useTheme } from "@/components/Theme/ThemeProvider";
+import { createStopwatch, formatMs } from "@/lib/utils";
+import { TtsWsPlayer } from "@/lib/ttsWs";
+import { streamSSE } from "@/lib/sse";
 import { GlassButton } from "@/components/ui/glass-button";
 import { type VoiceVisualState } from "@/machines/voiceMachine";
 import { useVoiceService } from "@/machines/useVoiceService";
+import ConsolePanel from "@/components/Console/ConsolePanel";
 
 export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
@@ -20,22 +23,9 @@ export default function Home() {
   const [canRecord, setCanRecord] = useState<boolean>(false);
   const { theme, toggle } = useTheme();
 
-  // VAD refs/state
-  const vadAudioContextRef = useRef<AudioContext | null>(null);
-  const vadAnalyserRef = useRef<AnalyserNode | null>(null);
-  const vadRafRef = useRef<number | null>(null);
-  const vadStartedSpeakingAtRef = useRef<number | null>(null);
-  const vadSilenceSinceRef = useRef<number | null>(null);
-  const vadTriggeredStopRef = useRef<boolean>(false);
-  const vadHasSpokenRef = useRef<boolean>(false);
-  const vadInSilenceRef = useRef<boolean>(false);
+  // Shared mic stream and machine sender
+  const sharedStreamRef = useRef<MediaStream | null>(null);
   const sendRef = useRef<((event: { type: string; [k: string]: unknown }) => void) | null>(null);
-
-  // Tunable VAD thresholds
-  const SPEECH_THRESHOLD = 0.04; // normalized RMS considered as speech onset
-  const SILENCE_THRESHOLD = 0.015; // normalized RMS considered as silence
-  const SPEECH_MIN_MS = 160; // require at least this much voiced audio to mark as speaking
-  const SILENCE_MIN_MS = 800; // stop after this much silence following speech
 
   useEffect(() => {
     setCanRecord(typeof window !== "undefined" && "MediaRecorder" in window);
@@ -54,31 +44,16 @@ export default function Home() {
 
   const clearLogs = useCallback(() => { setLogs([]); }, []);
 
-  const stopVAD = useCallback(() => {
-    if (vadRafRef.current !== null) {
-      cancelAnimationFrame(vadRafRef.current);
-      vadRafRef.current = null;
+  const releaseSharedStream = useCallback(() => {
+    if (sharedStreamRef.current) {
+      try { sharedStreamRef.current.getTracks().forEach((t) => t.stop()); } catch {}
+      sharedStreamRef.current = null;
     }
-    if (vadAnalyserRef.current) {
-      try { vadAnalyserRef.current.disconnect(); } catch {}
-      vadAnalyserRef.current = null;
-    }
-    if (vadAudioContextRef.current) {
-      try { vadAudioContextRef.current.close(); } catch {}
-      vadAudioContextRef.current = null;
-    }
-    vadStartedSpeakingAtRef.current = null;
-    vadSilenceSinceRef.current = null;
-    vadTriggeredStopRef.current = false;
-    vadHasSpokenRef.current = false;
-    vadInSilenceRef.current = false;
-    appendLog("VAD monitoring stopped");
   }, []);
 
   const stopRecording = useCallback(() => {
     if (!mediaRecorderRef.current) return;
     try { mediaRecorderRef.current.stop(); } catch {}
-    try { mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop()); } catch {}
     mediaRecorderRef.current = null;
     setIsRecording(false);
     appendLog("Stopping recording…");
@@ -93,18 +68,23 @@ export default function Home() {
     onStartListening: async () => {
       if (!canRecord) return;
       appendLog("Starting listening…");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // Start VAD over this stream
-      startVAD(stream);
+      try {
+        vad.start();
+        appendLog("VAD started");
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        appendLog(`VAD start error: ${msg}`);
+      }
     },
     onStopAll: () => {
       // Stop playback, VAD, and capture
-      stopVAD();
+      vad.pause();
       stopRecording();
       if (currentAudioRef.current) {
         try { currentAudioRef.current.pause(); } catch {}
         currentAudioRef.current = null;
       }
+      releaseSharedStream();
     },
     startCapture: () => { void startRecording(); },
     stopCapture: () => { stopRecording(); },
@@ -118,27 +98,106 @@ export default function Home() {
       window.dispatchEvent(new CustomEvent("voice-state", { detail: { state: s } } as any));
     },
     processPipeline: async ({ blob }: { blob: Blob }) => {
+      const sw = createStopwatch();
       appendLog("Recording stopped. Transcribing with ElevenLabs…");
       const form = new FormData();
       form.append("file", blob, "audio.webm");
       const sttResp = await fetch("/api/stt", { method: "POST", body: form });
-      appendLog(`STT response status: ${sttResp.status}`);
+      const sttNetworkMs = sw.splitMs();
+      appendLog(`STT response status: ${sttResp.status} (network: ${formatMs(sttNetworkMs)})`);
       if (!sttResp.ok) throw new Error("STT failed");
       const sttData = (await sttResp.json()) as { transcription?: string; text?: string };
+      const sttParseMs = sw.splitMs();
+      appendLog(`STT parsed (${formatMs(sttParseMs)})`);
       const transcribedText = (sttData?.transcription || sttData?.text || "").trim();
       if (!transcribedText) throw new Error("No transcription captured");
       appendLog(`Transcribed: "${transcribedText}"`);
-      appendLog("Calling AI endpoint (stream=false)…");
-      const aiResp = await fetch("/api/generateAnswerStream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: transcribedText, stream: false }) });
-      appendLog(`AI response status: ${aiResp.status}`);
-      const aiData = await aiResp.json();
-      const answerText = (aiData?.answer || aiData?.text || aiData?.message || JSON.stringify(aiData)) as string;
-      appendLog(`AI answer: ${typeof answerText === "string" ? answerText.slice(0, 120) : "[object]"}`);
-      appendLog("Calling ElevenLabs TTS…");
-      const ttsResp = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: answerText }) });
-      appendLog(`TTS response status: ${ttsResp.status}`);
-      const audioBuffer = await ttsResp.arrayBuffer();
-      return { transcribedText, answerText, audioBuffer };
+      // Streaming path: AI SSE -> ElevenLabs WS TTS
+      appendLog("Starting AI SSE (stream=true)…");
+      const apiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY || "";
+      const modelId = process.env.NEXT_PUBLIC_ELEVENLABS_MODEL_ID || process.env.ELEVENLABS_MODEL_ID || "eleven_flash_v2_5";
+      const voiceId = process.env.NEXT_PUBLIC_ELEVENLABS_VOICE_ID || process.env.ELEVENLABS_VOICE_ID || "";
+      if (!apiKey || !voiceId) {
+        appendLog("Missing ElevenLabs API key or Voice ID for WS; falling back to REST TTS (deprecated)");
+        const aiResp = await fetch("/api/generateAnswerStream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: transcribedText, stream: false }) });
+        const aiNetworkMs = sw.splitMs();
+        appendLog(`AI response status: ${aiResp.status} (network: ${formatMs(aiNetworkMs)})`);
+        const aiData = await aiResp.json();
+        const aiParseMs = sw.splitMs();
+        appendLog(`AI parsed (${formatMs(aiParseMs)})`);
+        const answerText = (aiData?.answer || aiData?.text || aiData?.message || JSON.stringify(aiData)) as string;
+        appendLog("Calling ElevenLabs TTS (REST)…");
+        const ttsResp = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: answerText }) });
+        const ttsNetworkMs = sw.splitMs();
+        appendLog(`TTS response status: ${ttsResp.status} (network: ${formatMs(ttsNetworkMs)})`);
+        const audioBuffer = await ttsResp.arrayBuffer();
+        const ttsDecodeMs = sw.splitMs();
+        appendLog(`TTS audio buffered (${formatMs(ttsDecodeMs)})`);
+        return { transcribedText, answerText, audioBuffer };
+      }
+
+      const player = new TtsWsPlayer({
+        apiKey,
+        voiceId,
+        modelId,
+        onLog: appendLog,
+        // Start with defaults; we can expose tuning later
+      });
+
+      try {
+        await player.connect();
+      } catch (e) {
+        appendLog(`TTS WS connect failed: ${(e as Error).message}. Falling back to REST TTS.`);
+        const aiResp = await fetch("/api/generateAnswerStream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: transcribedText, stream: false }) });
+        const aiNetworkMs = sw.splitMs();
+        appendLog(`AI response status: ${aiResp.status} (network: ${formatMs(aiNetworkMs)})`);
+        const aiData = await aiResp.json();
+        const aiParseMs = sw.splitMs();
+        appendLog(`AI parsed (${formatMs(aiParseMs)})`);
+        const answerText = (aiData?.answer || aiData?.text || aiData?.message || JSON.stringify(aiData)) as string;
+        appendLog("Calling ElevenLabs TTS (REST)…");
+        const ttsResp = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: answerText }) });
+        const ttsNetworkMs = sw.splitMs();
+        appendLog(`TTS response status: ${ttsResp.status} (network: ${formatMs(ttsNetworkMs)})`);
+        const audioBuffer = await ttsResp.arrayBuffer();
+        const ttsDecodeMs = sw.splitMs();
+        appendLog(`TTS audio buffered (${formatMs(ttsDecodeMs)})`);
+        return { transcribedText, answerText, audioBuffer };
+      }
+      const wsStartMs = sw.splitMs();
+      appendLog(`TTS WS connected (${formatMs(wsStartMs)})`);
+
+      const aborter = new AbortController();
+      let assembledText = "";
+      await streamSSE("/api/generateAnswerStream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: transcribedText, stream: true }),
+        signal: aborter.signal,
+      }, {
+        onMessage: (data) => {
+          // Expect upstream SSE data shape; adjust if needed
+          // Based on sample logs, tokens arrive as { event: "message", message: string }
+          const token = typeof data === "string" ? data : (data as any)?.message || (data as any)?.delta || (data as any)?.text || (data as any)?.answer || "";
+          if (typeof token === "string" && token.length > 0) {
+            assembledText += token;
+            appendLog(`AI SSE token: "${token.slice(0, 60)}"${token.length > 60 ? "…" : ""}`);
+            player.sendText(token);
+          }
+          if (typeof data !== "string") {
+            try { appendLog(`AI SSE raw: ${JSON.stringify(data).slice(0, 200)}`); } catch {}
+          }
+        },
+        onError: (e) => { appendLog(`AI SSE error: ${String(e)}`); },
+        onDone: () => {
+          // Force out any buffered text for very short endings
+          player.flush();
+          appendLog("AI SSE done; flushed TTS buffer");
+        },
+      });
+
+      // We return a dummy buffer to satisfy the machine contract, but playback is already ongoing via WS player.
+      return { transcribedText, answerText: assembledText, audioBuffer: new ArrayBuffer(0) };
     },
     log: appendLog,
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -149,91 +208,103 @@ export default function Home() {
   // Keep a ref to the current audio to allow interruption
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  const startVAD = useCallback((stream: MediaStream) => {
-    try {
-      // Initialize WebAudio graph for RMS monitoring
-      const AC: typeof AudioContext = (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }).AudioContext ?? (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }).webkitAudioContext!;
-      const audioContext = new AC();
-      vadAudioContextRef.current = audioContext;
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.8;
-      vadAnalyserRef.current = analyser;
-      const source = audioContext.createMediaStreamSource(stream);
-      source.connect(analyser);
-      appendLog("VAD monitoring started");
-
-      const buf = new Uint8Array(analyser.fftSize);
-      const tick = () => {
-        if (!vadAnalyserRef.current) return; // stopped
-        vadAnalyserRef.current.getByteTimeDomainData(buf);
-        let sumSquares = 0;
-        for (let i = 0; i < buf.length; i += 1) {
-          const v = (buf[i] - 128) / 128;
-          sumSquares += v * v;
-        }
-        const rms = Math.sqrt(sumSquares / buf.length);
-        const normalized = Math.min(1, rms * 1.6);
-
-        const now = performance.now();
-        // Detect speech onset
-        if (normalized > SPEECH_THRESHOLD) {
-          if (vadStartedSpeakingAtRef.current === null) {
-            vadStartedSpeakingAtRef.current = now;
-          }
-          // reset silence clock while above silence threshold
-          if (normalized >= SILENCE_THRESHOLD) {
-            vadSilenceSinceRef.current = null;
-          }
-        } else {
-          // below speech threshold cancels pending onset if it hasn't lasted long enough
-          if (vadStartedSpeakingAtRef.current !== null && (now - vadStartedSpeakingAtRef.current) < SPEECH_MIN_MS) {
-            vadStartedSpeakingAtRef.current = null;
-          }
-        }
-
-        // If we have spoken for long enough previously, watch for sustained silence
-        const spokenLongEnough = vadStartedSpeakingAtRef.current !== null && (now - vadStartedSpeakingAtRef.current) >= SPEECH_MIN_MS;
-        if (spokenLongEnough) {
-          if (!vadHasSpokenRef.current) {
-            vadHasSpokenRef.current = true;
-            appendLog("VAD: speech detected");
-            if (sendRef.current) sendRef.current({ type: "VAD_SPEECH_START" });
-          }
-          if (normalized < SILENCE_THRESHOLD) {
-            if (vadSilenceSinceRef.current === null) {
-              vadSilenceSinceRef.current = now;
-              if (!vadInSilenceRef.current) {
-                vadInSilenceRef.current = true;
-                appendLog("VAD: silence detected");
-              }
-            }
-            const silentFor = now - (vadSilenceSinceRef.current ?? now);
-            if (!vadTriggeredStopRef.current && silentFor >= SILENCE_MIN_MS) {
-              vadTriggeredStopRef.current = true;
-              appendLog("VAD: silence timeout");
-              if (sendRef.current) sendRef.current({ type: "VAD_SILENCE_TIMEOUT" });
-            }
-          } else {
-            vadSilenceSinceRef.current = null;
-            vadInSilenceRef.current = false;
-          }
-        }
-
-        vadRafRef.current = requestAnimationFrame(tick);
+  // Initialize VAD using vad-react
+  const vad = useMicVAD({
+    model: "v5",
+    startOnLoad: false,
+    // Relax thresholds to recommended defaults for easier detection
+    userSpeakingThreshold: 0.25,
+    positiveSpeechThreshold: 0.3,
+    negativeSpeechThreshold: 0.15,
+    redemptionMs: 800,
+    minSpeechMs: 250,
+    submitUserSpeechOnPause: true,
+    // Self-hosted assets for AudioWorklet and ORT WASM
+    baseAssetPath: "/vad-web/",
+    onnxWASMBasePath: "/onnx/",
+    getStream: async () => {
+      const needsNew = () => {
+        const s = sharedStreamRef.current;
+        if (!s) return true;
+        const tracks = s.getAudioTracks();
+        if (tracks.length === 0) return true;
+        const t = tracks[0];
+        return t.readyState !== "live" || t.muted === true || t.enabled === false;
       };
-      vadRafRef.current = requestAnimationFrame(tick);
-    } catch {
-      // Non-fatal; continue without VAD
-    }
-  }, [SILENCE_MIN_MS, SILENCE_THRESHOLD, SPEECH_MIN_MS, SPEECH_THRESHOLD, stopRecording, appendLog, send]);
+      if (needsNew()) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            autoGainControl: true,
+            noiseSuppression: true,
+          },
+        });
+        sharedStreamRef.current = stream;
+      }
+      return sharedStreamRef.current!;
+    },
+    pauseStream: async () => {
+      // Do not stop tracks; keep stream alive for reuse
+    },
+    resumeStream: async (s) => {
+      const tracks = s?.getAudioTracks?.() ?? [];
+      if (tracks.length > 0 && tracks[0].readyState === "live" && tracks[0].enabled !== false) return s;
+      // Reacquire if previous stream ended
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          autoGainControl: true,
+          noiseSuppression: true,
+        },
+      });
+      sharedStreamRef.current = stream;
+      return stream;
+    },
+    onFrameProcessed: () => { /* debug disabled */ },
+    onSpeechStart: () => {
+      appendLog("VAD: speech detected (onSpeechStart)");
+      if (sendRef.current) sendRef.current({ type: "VAD_SPEECH_START" });
+    },
+    onSpeechEnd: () => {
+      appendLog("VAD: speech ended (onSpeechEnd)");
+      if (sendRef.current) sendRef.current({ type: "VAD_SILENCE_TIMEOUT" });
+    },
+    onVADMisfire: () => { appendLog("VAD: misfire (too short)"); },
+    onSpeechRealStart: () => { appendLog("VAD: confirmed speech (onSpeechRealStart)"); },
+  });
+
+  // Diagnostics for vad-react state
+  useEffect(() => {
+    appendLog(`VAD loading=${vad.loading} listening=${vad.listening} userSpeaking=${vad.userSpeaking} errored=${vad.errored || false}`);
+  }, [vad.loading, vad.listening, vad.userSpeaking, vad.errored]);
 
   const startRecording = useCallback(async () => {
     if (!canRecord || isRecording) return;
     try {
       appendLog("Requesting microphone access…");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      // Always reuse the same stream instance managed by vad.getStream
+      try { vad.start(); } catch {}
+      const stream = sharedStreamRef.current ?? await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!sharedStreamRef.current) sharedStreamRef.current = stream;
+      // Try explicit mimeType for broader compatibility
+      const preferredTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/ogg'
+      ];
+      let mediaRecorder: MediaRecorder | null = null;
+      for (const t of preferredTypes) {
+        if ((window as any).MediaRecorder && (MediaRecorder as any).isTypeSupported?.(t)) {
+          try { mediaRecorder = new MediaRecorder(stream, { mimeType: t }); appendLog(`MediaRecorder using ${t}`); break; } catch {}
+        }
+      }
+      if (!mediaRecorder) {
+        mediaRecorder = new MediaRecorder(stream);
+        appendLog("MediaRecorder using default type");
+      }
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
       mediaRecorder.ondataavailable = (event: BlobEvent) => { if (event.data && event.data.size > 0) audioChunksRef.current.push(event.data); };
@@ -243,6 +314,7 @@ export default function Home() {
         appendLog("Recorder stopped. Dispatching blob to machine…");
         send({ type: "RECORDING_STOPPED", blob: audioBlob });
       };
+      mediaRecorder.onerror = (e: unknown) => { appendLog(`MediaRecorder error: ${String((e as any)?.error || e)}`); };
       mediaRecorder.start();
       setIsRecording(true);
       appendLog("Recording started.");
@@ -252,13 +324,14 @@ export default function Home() {
       appendLog(`Microphone access error: ${err.message}`);
       console.error("Microphone access error", error);
     }
-  }, [appendLog, canRecord, isRecording, startVAD, send]);
+  }, [appendLog, canRecord, isRecording, send]);
 
   
 
   // removed old voiceDeps block (moved above to define `send` early)
 
   // When machine enters playing with audioBuffer, play it and send AUDIO_ENDED on end
+  // NOTE: Deprecated path: REST TTS playback. With WS streaming we auto-play via TtsWsPlayer.
   useEffect(() => {
     const audioBuf = state.context.audioBuffer;
     // Only start playback once when entering playing with a fresh buffer
@@ -302,30 +375,14 @@ export default function Home() {
         </Button>
       </div>
 
-      <div className="fixed bottom-4 right-4 z-50">
-        <Sheet>
-          <SheetTrigger asChild>
-            <Button variant="default">Console</Button>
-          </SheetTrigger>
-          <SheetContent side="right">
-            <SheetHeader>
-              <SheetTitle>Voice Chat Console</SheetTitle>
-            </SheetHeader>
-            <div className="p-4 flex items-center gap-3">
-              <div className="text-sm text-muted-foreground">
-                {canRecord ? (isRecording ? "Recording…" : "Idle") : "Recording unsupported"}
-              </div>
-              <div className="flex-1" />
-              <Button type="button" variant="secondary" onClick={clearLogs} disabled={logs.length === 0}>
-                Clear
-              </Button>
-            </div>
-            <div className="p-4 pt-0">
-              <Textarea ref={consoleRef} readOnly value={logs.join("\n")} placeholder="Logs will appear here…" className="h-[36dvh] font-mono text-xs" />
-            </div>
-          </SheetContent>
-        </Sheet>
-      </div>
+      <ConsolePanel
+        logs={logs}
+        canRecord={canRecord}
+        isRecording={isRecording}
+        onClear={clearLogs}
+        textareaRef={consoleRef}
+        hideOverlay
+      />
     </div>
   );
 }

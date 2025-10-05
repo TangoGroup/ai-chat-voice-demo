@@ -66,7 +66,9 @@ function SheetContent({
         )}
         onEscapeKeyDown={dismissible ? undefined : (e) => e.preventDefault()}
         onPointerDownOutside={(e) => {
-          e.preventDefault();
+          if (!dismissible) {
+            e.preventDefault();
+          }
         }}
         {...props}
       >
