@@ -16,6 +16,8 @@ export interface TtsWsPlayerOptions {
   // Configure buffering behavior for time-to-first-audio vs quality tradeoff
   chunkLengthSchedule?: number[]; // e.g., [120, 160, 250, 290]
   onLog?: (msg: string) => void;
+  onFirstAudio?: () => void;
+  onFinal?: () => void;
 }
 
 export class TtsWsPlayer {
@@ -38,6 +40,13 @@ export class TtsWsPlayer {
   async connect(): Promise<void> {
     const { voiceId, modelId, onLog } = this.opts;
     const url = `wss://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream-input?model_id=${encodeURIComponent(modelId)}`;
+    // Reset any prior session state
+    this.teardownMedia("pre-connect");
+    this.pendingChunks = [];
+    this.isBufferUpdating = false;
+    this.sourceBuffer = null;
+    this.mediaSource = null;
+    this.firstAudioResolved = false;
     // Feature detection for MSE with MP3
     if (!("MediaSource" in window) || !(window as unknown as { MediaSource?: typeof MediaSource }).MediaSource) {
       throw new Error("MediaSource not supported in this browser");
@@ -108,12 +117,14 @@ export class TtsWsPlayer {
                 this.firstAudioResolved = true;
                 void this.audioEl.play().catch(() => { /* autoplay might be blocked; user gesture exists in flow */ });
                 if (onLog) onLog("TTS WS: first audio chunk received; playback started");
+                try { this.opts.onFirstAudio?.(); } catch {}
               }
-              if (onLog) onLog(`TTS WS <- audio chunk (${(bytes as ArrayBuffer).byteLength} bytes, ${payload.audio.length} b64 chars)`);
+              // suppress per-chunk logs for noise reduction
             }
             if (payload.isFinal) {
               if (onLog) onLog("TTS WS: final message received");
               this.endOfStream();
+              try { this.opts.onFinal?.(); } catch {}
             }
           } catch (e) {
             if (onLog) onLog(`TTS WS parse error: ${(e as Error).message}`);
@@ -155,6 +166,7 @@ export class TtsWsPlayer {
     try { this.ws?.close(); } catch {}
     this.ws = null;
     this.endOfStream();
+    this.teardownMedia("close");
   }
 
   private enqueue(bytes: ArrayBuffer) {
@@ -177,6 +189,31 @@ export class TtsWsPlayer {
   private endOfStream() {
     if (this.mediaSource && this.mediaSource.readyState === "open") {
       try { this.mediaSource.endOfStream(); } catch {}
+    }
+  }
+
+  private teardownMedia(reason: string) {
+    try {
+      if (this.sourceBuffer) {
+        try { this.sourceBuffer.abort(); } catch {}
+      }
+      this.sourceBuffer = null;
+      this.pendingChunks = [];
+      this.isBufferUpdating = false;
+      if (this.mediaSource) {
+        try { if (this.mediaSource.readyState === "open") this.mediaSource.endOfStream(); } catch {}
+      }
+      this.mediaSource = null;
+      if (this.objectUrl) {
+        try { URL.revokeObjectURL(this.objectUrl); } catch {}
+      }
+      this.objectUrl = null;
+      // Reset audio element to ensure new MSE pipeline can be attached next session
+      try { this.audioEl.pause(); } catch {}
+      this.audioEl.removeAttribute("src");
+      try { this.audioEl.load(); } catch {}
+    } catch {
+      // ignore
     }
   }
 }

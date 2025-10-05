@@ -48,3 +48,58 @@ export function formatMs(ms: number): string {
   const s = Math.round(seconds - m * 60);
   return `${m}m ${s}s`;
 }
+
+// Chat threading utilities
+export const CHAT_ID_STORAGE_KEY = "chatId";
+
+function safeLocalStorage(): Storage | null {
+  try {
+    if (typeof window === "undefined") return null;
+    return window.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function generateChatId(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // fall through to fallback
+  }
+  // Fallback: timestamp + random segment
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `chat_${Date.now()}_${rand}`;
+}
+
+export function getStoredChatId(): string | null {
+  const ls = safeLocalStorage();
+  if (!ls) return null;
+  const id = ls.getItem(CHAT_ID_STORAGE_KEY);
+  return id && id.trim().length > 0 ? id : null;
+}
+
+export function startNewChat(): string {
+  const id = generateChatId();
+  const ls = safeLocalStorage();
+  try { ls?.setItem(CHAT_ID_STORAGE_KEY, id); } catch {}
+  return id;
+}
+
+export function ensureChatId(): string {
+  const existing = getStoredChatId();
+  if (existing) return existing;
+  return startNewChat();
+}
+
+export function setChatId(id: string): void {
+  const ls = safeLocalStorage();
+  try { ls?.setItem(CHAT_ID_STORAGE_KEY, id); } catch {}
+}
+
+export function clearChatId(): void {
+  const ls = safeLocalStorage();
+  try { ls?.removeItem(CHAT_ID_STORAGE_KEY); } catch {}
+}

@@ -81,6 +81,16 @@ Develop a voice chat POC using custom AI API endpoints, ElevenLabs (11L), and a 
 
 - REST-based TTS flow (`/api/tts` + arrayBuffer playback in `page.tsx`) is DEPRECATED; retained as fallback.
 
+### Interrupt Semantics
+
+- On any interrupt (`VAD_SPEECH_START` while not `ready`/`error`, or `STOP_ALL`):
+  - Stop MediaRecorder capture if active.
+  - Pause and clear any HTMLAudioElement playback.
+  - Abort active AI SSE via `AbortController`.
+  - Close active ElevenLabs WS `TtsWsPlayer` and teardown its MediaSource.
+  - Cleanup TTS analyser graph and animation frame.
+  - This ensures prior speech cannot overlap with new speech.
+
 ## State Machine (XState v5)
 
 ### Regions
@@ -95,9 +105,9 @@ VAD is `on` for all control states except `ready` and `error`.
 - `RECORDING_STOPPED{ blob }`, `AUDIO_ENDED`
 
 ### Policies
-- Speech start while `listening_idle` → `capturing` and start MediaRecorder.
+- Speech start while `listening_idle` → `capturing` and start MediaRecorder. Also call `stopPlayback` to ensure no residual TTS.
 - Silence timeout while `capturing` → stop capture → `processing` with blob.
-- Speech start during `playing` or `processing` preempts: stop playback/pipeline, go to `capturing` and begin a new utterance.
+- Speech start during `playing` or `processing` preempts: stop playback/pipeline (including WS TTS and SSE), go to `capturing` and begin a new utterance.
 - Button: in `ready` starts listening; otherwise acts as stop (`STOP_ALL`).
 
 ### Visualizer Mapping
@@ -108,4 +118,40 @@ VAD is `on` for all control states except `ready` and `error`.
   - Examples: mic access requests, recording start/stop, VAD start/stop, speech detected, silence detected, auto-stop triggers, STT request/response status, AI request/response status, TTS request status, audio playback start/end.
   - Rationale: aids debugging, demo clarity, and post-run analysis.
 
+
+### State Machine Actions Structure (2025-10-05)
+
+- We moved all inline actions in `src/machines/voiceMachine.ts` into named actions defined in the machine setup under `actions`.
+- Benefits:
+  - Clear separation between declarative statechart and imperative side effects.
+  - Reuse and testability of actions; improved readability and logging.
+  - Type safety: event-specific assignment actions now narrow events with a type guard (e.g., `isProcessDoneEvent`).
+- Key named actions:
+  - VAD control: `turnVadOn`, `turnVadOff` (dispatch internal events via `raise`).
+  - Visualizer: `vizPassive`, `vizListening`, `vizThinking`, `vizSpeaking`.
+  - Controls: `startListeningInfra`, `stopAll`, `startCapture`, `stopCapture`, `stopPlayback`.
+  - Context: `storeRecordingBlob`, `storeProcessOutput`, `storeErrorFromEvent`, `clearAudioBuffer`, `clearError`.
+  - Logging: `logVadOn`, `logVadOff`.
+- Implementation detail: `storeProcessOutput` uses a type guard on `DoneActorEvent` for `processActor` to avoid unsafe casts.
+
+### Deterministic Visualizer + Control Flow (2025-10-05)
+
+- Problem: `page.tsx` directly drove the visualizer on streaming TTS (`onFirstAudio`), creating side effects outside the machine.
+- Change:
+  - Introduced `TTS_STARTED` event. When WS TTS produces first audio, UI dispatches `TTS_STARTED`; the machine handles it in `processing` with `vizSpeaking` action (no transition, invoke continues).
+  - Added `hasAudioBuffer` guard for `onDone` from `processActor`:
+    - If buffer present (REST TTS path), transition to `playing`.
+    - If no buffer (WS streaming path), skip `playing` to `listening_idle` after storing text.
+  - Removed direct visualizer state manipulation in `page.tsx` for TTS start. Volume updates still emit `voice-state` for the visualizer.
+- Result: visualizer and control transitions are exclusively driven by machine events and actions for reproducibility.
+
+
+### Chat Threading (2025-10-05)
+
+- We persist the upstream-issued chat thread ID in `localStorage` under key `chatId`.
+- Source of truth: captured from the SSE start event (or REST JSON) as `chat_id` when the conversation begins.
+- We do NOT pre-create the chat. If a stored chat exists, we pass it on the next request; otherwise the server assigns a new `chat_id` which we persist.
+- The "New conversation" button now clears the stored chat ID; the next interaction captures a fresh `chat_id` from the start event.
+- Client logs surface the chat ID when captured and in AI request lifecycle.
+- Utilities in `src/lib/utils.ts`: `getStoredChatId`, `setChatId`, `clearChatId` (legacy generators retained but unused).
 

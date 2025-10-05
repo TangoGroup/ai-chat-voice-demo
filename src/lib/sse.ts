@@ -16,7 +16,8 @@ export async function streamSSE(url: string, init: RequestInit, opts: SSEOptions
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      // Normalize CRLF to LF to ensure consistent event delimiters
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
       let idx: number;
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
         const chunk = buffer.slice(0, idx);

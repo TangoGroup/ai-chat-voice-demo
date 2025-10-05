@@ -20,7 +20,8 @@ export type VoiceEvents =
   | { type: "AUDIO_ENDED" }
   | { type: "ERROR"; message: string }
   | { type: "VAD_TURN_ON" }
-  | { type: "VAD_TURN_OFF" };
+  | { type: "VAD_TURN_OFF" }
+  | { type: "TTS_STARTED" };
 
 export interface ProcessInput {
   blob: Blob;
@@ -43,6 +44,11 @@ export interface VoiceMachineDeps {
   stopPlayback: () => void; // stop currently playing audio if any
 }
 
+function isProcessDoneEvent(event: unknown): event is DoneActorEvent<ProcessOutput> {
+  const t = (event as { type?: string })?.type;
+  return typeof t === "string" && t === "xstate.done.actor.processActor";
+}
+
 export function createVoiceMachine(deps: VoiceMachineDeps) {
   const d = deps;
 
@@ -55,6 +61,60 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       processActor: fromPromise(async ({ input }: { input: ProcessInput }) => {
         return d.processPipeline(input);
       }),
+    },
+    actions: {
+      // VAD control events
+      turnVadOn: raise({ type: "VAD_TURN_ON" }),
+      turnVadOff: raise({ type: "VAD_TURN_OFF" }),
+
+      // Visualizer updates
+      vizPassive: () => d.onVisualizerState("passive"),
+      vizListening: () => d.onVisualizerState("listening"),
+      vizThinking: () => d.onVisualizerState("thinking"),
+      vizSpeaking: () => d.onVisualizerState("speaking"),
+
+      // Lifecycle controls
+      startListeningInfra: () => d.onStartListening(),
+      stopAll: () => d.onStopAll(),
+      startCapture: () => d.startCapture(),
+      stopCapture: () => d.stopCapture(),
+      stopPlayback: () => d.stopPlayback(),
+
+      // Context assignments
+      storeRecordingBlob: assign(({ event }) => {
+        if (event.type === "RECORDING_STOPPED") {
+          return { recordingBlob: event.blob, error: null } as Partial<VoiceContext>;
+        }
+        return {} as Partial<VoiceContext>;
+      }),
+      storeProcessOutput: assign((params) => {
+        const evt = params.event as unknown;
+        if (!isProcessDoneEvent(evt)) return {} as Partial<VoiceContext>;
+        return {
+          transcribedText: evt.output.transcribedText,
+          answerText: evt.output.answerText,
+          audioBuffer: evt.output.audioBuffer,
+          error: null,
+        } as Partial<VoiceContext>;
+      }),
+      storeErrorFromEvent: assign(({ event }) => {
+        const errObj = (event as { error?: unknown })?.error as Error | undefined;
+        return { error: errObj?.message ?? "Unknown error" } as Partial<VoiceContext>;
+      }),
+      clearAudioBuffer: assign(() => ({ audioBuffer: null } as Partial<VoiceContext>)),
+      clearError: assign(() => ({ error: null } as Partial<VoiceContext>)),
+
+      // Logging
+      logVadOn: () => d.log("VAD ON"),
+      logVadOff: () => d.log("VAD OFF"),
+    },
+    guards: {
+      hasAudioBuffer: (params) => {
+        const evt = params.event as unknown;
+        if (!isProcessDoneEvent(evt)) return false;
+        const buf = evt.output?.audioBuffer;
+        return buf instanceof ArrayBuffer && buf.byteLength > 0;
+      },
     },
   }).createMachine({
     id: "voice",
@@ -71,86 +131,74 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
         initial: "ready",
         states: {
           ready: {
-            entry: [raise({ type: "VAD_TURN_OFF" }), () => d.onVisualizerState("passive")],
+            entry: ["turnVadOff", "vizPassive"],
             on: {
               START_LISTENING: {
                 target: "listening_idle",
-                actions: () => d.onStartListening(),
+                actions: "startListeningInfra",
               },
             },
           },
           listening_idle: {
-            entry: [raise({ type: "VAD_TURN_ON" }), () => d.onVisualizerState("listening")],
+            entry: ["turnVadOn", "vizListening"],
             on: {
-              STOP_ALL: { target: "ready", actions: () => d.onStopAll() },
-              VAD_SPEECH_START: { target: "capturing", actions: () => d.startCapture() },
+              STOP_ALL: { target: "ready", actions: "stopAll" },
+              // Ensure any residual playback (e.g., WS TTS) is stopped when user interrupts from idle
+              VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture"] },
             },
           },
           capturing: {
-            entry: [() => d.onVisualizerState("listening")],
+            entry: ["vizListening"],
             on: {
-              STOP_ALL: { target: "ready", actions: () => d.onStopAll() },
-              VAD_SILENCE_TIMEOUT: { actions: () => d.stopCapture() },
+              STOP_ALL: { target: "ready", actions: "stopAll" },
+              VAD_SILENCE_TIMEOUT: { actions: "stopCapture" },
               RECORDING_STOPPED: {
                 target: "processing",
-                actions: assign(({ event }) => {
-                  if (event.type === "RECORDING_STOPPED") {
-                    return { recordingBlob: event.blob, error: null } as Partial<VoiceContext>;
-                  }
-                  return {} as Partial<VoiceContext>;
-                }),
+                actions: "storeRecordingBlob",
               },
             },
           },
           processing: {
-            entry: [() => d.onVisualizerState("thinking")],
+            entry: ["vizThinking"],
             on: {
-              STOP_ALL: { target: "ready", actions: () => d.onStopAll() },
-              VAD_SPEECH_START: { target: "capturing", actions: [() => d.stopPlayback(), () => d.startCapture()] },
+              // Interrupt: immediately return to listening (keep VAD on)
+              STOP_ALL: { target: "listening_idle", actions: ["stopPlayback", "startListeningInfra"] },
+              VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture"] },
+              TTS_STARTED: { actions: "vizSpeaking" },
             },
             invoke: {
               src: "processActor",
               input: ({ context }) => ({ blob: context.recordingBlob! }),
-              onDone: {
-                target: "playing",
-                actions: assign(({ event }) => {
-                  const done = event as DoneActorEvent<ProcessOutput>;
-                  return {
-                    transcribedText: done.output.transcribedText,
-                    answerText: done.output.answerText,
-                    audioBuffer: done.output.audioBuffer,
-                    error: null,
-                  } as Partial<VoiceContext>;
-                }),
-              },
+              onDone: [
+                { guard: "hasAudioBuffer", target: "playing", actions: "storeProcessOutput" },
+                { target: "listening_idle", actions: "storeProcessOutput" },
+              ],
               onError: {
                 target: "error",
-                actions: assign(({ event }) => {
-                  const errObj = (event as { error?: unknown })?.error as Error | undefined;
-                  return { error: errObj?.message ?? "Unknown error" } as Partial<VoiceContext>;
-                }),
+                actions: "storeErrorFromEvent",
               },
             },
           },
           playing: {
-            entry: [() => d.onVisualizerState("speaking")],
+            entry: ["vizSpeaking"],
             on: {
-              STOP_ALL: { target: "ready", actions: () => d.onStopAll() },
-              VAD_SPEECH_START: { target: "capturing", actions: [() => d.stopPlayback(), () => d.startCapture()] },
+              // Interrupt: immediately return to listening (keep VAD on)
+              STOP_ALL: { target: "listening_idle", actions: ["stopPlayback", "startListeningInfra"] },
+              VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture"] },
               AUDIO_ENDED: {
                 target: "listening_idle",
-                actions: assign(() => ({ audioBuffer: null } as Partial<VoiceContext>)),
+                actions: "clearAudioBuffer",
               },
             },
           },
           error: {
-            entry: [raise({ type: "VAD_TURN_OFF" }), () => d.onVisualizerState("passive")],
+            entry: ["turnVadOff", "vizPassive"],
             on: {
               START_LISTENING: {
                 target: "listening_idle",
-                actions: assign(() => ({ error: null } as Partial<VoiceContext>)),
+                actions: "clearError",
               },
-              STOP_ALL: { target: "ready", actions: () => d.onStopAll() },
+              STOP_ALL: { target: "ready", actions: "stopAll" },
             },
           },
         },
@@ -164,8 +212,8 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
           on: {
-            entry: () => d.log("VAD ON"),
-            exit: () => d.log("VAD OFF"),
+            entry: "logVadOn",
+            exit: "logVadOff",
             on: {
               VAD_TURN_OFF: "off",
             },

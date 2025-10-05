@@ -50,6 +50,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Authentication failed" }, { status: 401 });
     }
 
+    // Debug: observe chat usage in upstream calls
+    try { console.log("/api/generateAnswerStream request", { chatId, stream: Boolean(stream) }); } catch {}
+
     const upstreamResponse = await fetch(targetUrl, {
       method: "POST",
       headers: {
@@ -57,7 +60,7 @@ export async function POST(req: Request) {
         ...authHeader,
       },
       body: JSON.stringify({
-        chat_id: chatId,
+        // chat_id: chatId,
         query,
         sources_limit: 10,
         stream: Boolean(stream),
