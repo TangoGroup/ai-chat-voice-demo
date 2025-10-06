@@ -15,7 +15,13 @@ export function useVoiceService(deps: Parameters<typeof createVoiceMachine>[0]) 
   type Snap = SnapshotFrom<typeof machine>;
   type Ev = EventFromLogic<typeof machine>;
   const actorRef = useRef<ActorRef<Snap, Ev> | null>(null);
-  const initialContext = (machine.config as any).context as VoiceContext;
+  const initialContext: VoiceContext = {
+    transcribedText: null,
+    answerText: null,
+    audioBuffer: null,
+    error: null,
+    recordingBlob: null,
+  };
   const [snapshot, setSnapshot] = useState<VoiceSnapshot>({ value: { control: "ready", vad: "off" }, context: initialContext });
 
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { setup, createMachine, assign, fromPromise, raise, type DoneActorEvent } from "xstate";
+import { setup, assign, fromPromise, raise, type DoneActorEvent } from "xstate";
 
 // Visualizer voice state union reused across the app
 export type VoiceVisualState = "passive" | "listening" | "thinking" | "speaking";
@@ -135,7 +135,6 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             on: {
               START_LISTENING: {
                 target: "listening_idle",
-                actions: "startListeningInfra",
               },
             },
           },

@@ -10,7 +10,7 @@ type GlassButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 
 export const GlassButton = React.forwardRef<HTMLButtonElement, GlassButtonProps>(
-  ({ className, active = false, size = "md", diameter, blurClassName = "backdrop-blur-xl", children, ...props }, ref) => {
+  ({ className, active = false, size = "md", diameter, blurClassName = "backdrop-blur-md", children, ...props }, ref) => {
     const dimsPx = typeof diameter === "number" && diameter > 0 ? Math.floor(diameter) : undefined;
     const sizeClass = !dimsPx ? (size === "sm" ? "h-12 w-12" : size === "lg" ? "h-24 w-24" : "h-20 w-20") : undefined;
     return (
@@ -21,7 +21,7 @@ export const GlassButton = React.forwardRef<HTMLButtonElement, GlassButtonProps>
           sizeClass,
           // Frosted glass: 70% overlay + heavy backdrop blur
           blurClassName,
-          "bg-white/70 dark:bg-white/60 border border-white/30 shadow-[0_8px_24px_rgba(0,0,0,0.18)]",
+          "bg-cyan-300/10 dark:bg-cyan-200/10 border border-white/30 shadow-[0_8px_24px_rgba(0,0,0,0.18)]",
           active ? "ring-2 ring-primary/60" : "hover:scale-[1.03]",
           className
         )}

@@ -72,12 +72,18 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
     rafRef.current = requestAnimationFrame(tick);
   }, []);
 
+  const getAudioContextCtor = useCallback((): (typeof AudioContext) | null => {
+    const w = window as unknown as { webkitAudioContext?: typeof AudioContext; AudioContext?: typeof AudioContext };
+    return w.AudioContext ?? w.webkitAudioContext ?? null;
+  }, []);
+
   const start = useCallback(async () => {
     try {
       if (isActive) return;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       streamRef.current = stream;
-      const AC: typeof AudioContext = (window as any).AudioContext ?? (window as any).webkitAudioContext;
+      const AC = getAudioContextCtor();
+      if (!AC) throw new Error("AudioContext not supported");
       const audioContext = new AC();
       audioContextRef.current = audioContext;
       const analyser = audioContext.createAnalyser();
@@ -97,28 +103,7 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
     }
   }, [cleanup, fftSize, isActive, smoothingTimeConstant, tick]);
 
-  const attachAudioElement = useCallback(async (el: HTMLAudioElement) => {
-    try {
-      if (!audioContextRef.current) {
-        const AC: typeof AudioContext = (window as any).AudioContext ?? (window as any).webkitAudioContext;
-        audioContextRef.current = new AC();
-      }
-      if (!analyserRef.current) {
-        const analyser = audioContextRef.current.createAnalyser();
-        analyser.fftSize = fftSize;
-        analyser.smoothingTimeConstant = smoothingTimeConstant;
-        analyserRef.current = analyser;
-      }
-      const src = audioContextRef.current.createMediaElementSource(el);
-      sourceRef.current = src;
-      src.connect(analyserRef.current);
-      analyserRef.current.connect(audioContextRef.current.destination);
-      if (!rafRef.current) rafRef.current = requestAnimationFrame(tick);
-      setIsActive(true);
-    } catch (e) {
-      // non-fatal
-    }
-  }, [fftSize, smoothingTimeConstant, tick]);
+  // Removed attachAudioElement (unused)
 
   const stop = useCallback(() => { cleanup(); }, [cleanup]);
   useEffect(() => () => cleanup(), [cleanup]);

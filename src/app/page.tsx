@@ -77,8 +77,11 @@ export default function Home() {
     appendLog("Stopping recording…");
   }, [appendLog]);
 
-  
-
+  // Helper: safe AudioContext constructor resolver for browsers that expose webkitAudioContext
+  const getAudioContextCtor = useCallback((): (typeof AudioContext) | null => {
+    const w = window as unknown as { webkitAudioContext?: typeof AudioContext; AudioContext?: typeof AudioContext };
+    return w.AudioContext ?? w.webkitAudioContext ?? null;
+  }, []);
   
 
   // Machine wiring must be created before callbacks that reference `send`
@@ -131,7 +134,8 @@ export default function Home() {
     },
     onVisualizerState: (s: VoiceVisualState) => {
       appendLog(`Visualizer -> ${s}`);
-      window.dispatchEvent(new CustomEvent("voice-state", { detail: { state: s } } as any));
+      type VoiceStateEventDetail = { state?: VoiceVisualState; ttsVolume?: number };
+      window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { state: s } }));
     },
     processPipeline: async ({ blob }: { blob: Blob }) => {
       const sw = createStopwatch();
@@ -158,10 +162,17 @@ export default function Home() {
         const aiResp = await fetch("/api/generateAnswerStream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: transcribedText, stream: false, chatId: chatIdRef.current || undefined }) });
         const aiNetworkMs = sw.splitMs();
         appendLog(`AI response status: ${aiResp.status} (network: ${formatMs(aiNetworkMs)}) chatId=${chatIdRef.current ?? "none"}`);
-        const aiData = await aiResp.json();
+        type AIResponse = {
+          chat_id?: string;
+          chatId?: string;
+          answer?: string;
+          text?: string;
+          message?: string;
+        };
+        const aiData = (await aiResp.json()) as AIResponse;
         const aiParseMs = sw.splitMs();
         appendLog(`AI parsed (${formatMs(aiParseMs)})`);
-        const answerText = (aiData?.answer || aiData?.text || aiData?.message || JSON.stringify(aiData)) as string;
+        const answerText = (aiData.answer || aiData.text || aiData.message || JSON.stringify(aiData)) as string;
         appendLog("Calling ElevenLabs TTS (REST)…");
         const ttsResp = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: answerText }) });
         const ttsNetworkMs = sw.splitMs();
@@ -189,7 +200,7 @@ export default function Home() {
           try { if (sendRef.current) sendRef.current({ type: "TTS_STARTED" }); } catch {}
           try {
             if (!ttsAudioCtxRef.current) {
-              const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+              const Ctx = getAudioContextCtor();
               if (!Ctx) return;
               const ctx: AudioContext = new Ctx();
               const analyser = ctx.createAnalyser();
@@ -212,7 +223,10 @@ export default function Home() {
                   }
                   const rms = Math.sqrt(sum / data.length);
                   const vol = Math.min(1, Math.max(0, rms * 2.8));
-                  try { window.dispatchEvent(new CustomEvent("voice-state", { detail: { ttsVolume: vol } } as any)); } catch {}
+                  try {
+                    type VoiceStateEventDetail = { state?: VoiceVisualState; ttsVolume?: number };
+                    window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { ttsVolume: vol } }));
+                  } catch {}
                 }
                 ttsRafRef.current = requestAnimationFrame(step);
               };
@@ -251,16 +265,23 @@ export default function Home() {
         });
         const aiNetworkMs = sw.splitMs();
         appendLog(`AI response status: ${aiResp.status} (network: ${formatMs(aiNetworkMs)})`);
-        const aiData = await aiResp.json();
+        type AIResponse = {
+          chat_id?: string;
+          chatId?: string;
+          answer?: string;
+          text?: string;
+          message?: string;
+        };
+        const aiData = (await aiResp.json()) as AIResponse;
         const aiParseMs = sw.splitMs();
         appendLog(`AI parsed (${formatMs(aiParseMs)})`);
-        const respChatId = (aiData as any)?.chat_id || (aiData as any)?.chatId;
+        const respChatId = aiData.chat_id ?? aiData.chatId;
         if (typeof respChatId === "string" && respChatId) {
           chatIdRef.current = respChatId;
           setChatId(respChatId);
           appendLog(`Captured chat_id from REST: ${respChatId}`);
         }
-        const answerText = (aiData?.answer || aiData?.text || aiData?.message || JSON.stringify(aiData)) as string;
+        const answerText = (aiData.answer || aiData.text || aiData.message || JSON.stringify(aiData)) as string;
         appendLog("Calling ElevenLabs TTS (REST)…");
         const ttsResp = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: answerText }) });
         const ttsNetworkMs = sw.splitMs();
@@ -284,20 +305,30 @@ export default function Home() {
         signal: aborter.signal,
       }, {
         onMessage: (data) => {
-          // Expect upstream SSE data shape; adjust if needed
-          const eventType = (data as any)?.event || (data as any)?.type;
-          const upstreamChatId = (data as any)?.chat_id || (data as any)?.chatId;
+          type SSEMessage = {
+            event?: string;
+            type?: string;
+            chat_id?: string;
+            chatId?: string;
+            message?: string;
+            delta?: string;
+            text?: string;
+            answer?: string;
+          };
+          const obj: SSEMessage | null = (typeof data === "object" && data !== null) ? (data as SSEMessage) : null;
+          const eventType = obj?.event ?? obj?.type;
+          const upstreamChatId = obj?.chat_id ?? obj?.chatId;
           if ((eventType === "start" || eventType === "session_start" || eventType === "metadata") && typeof upstreamChatId === "string" && upstreamChatId) {
             chatIdRef.current = upstreamChatId;
             setChatId(upstreamChatId);
             appendLog(`Captured chat_id from SSE start: ${upstreamChatId}`);
             return;
           }
-          // Based on sample logs, tokens arrive as { event: "message", message: string }
-          const token = typeof data === "string" ? data : (data as any)?.message || (data as any)?.delta || (data as any)?.text || (data as any)?.answer || "";
+          const token = typeof data === "string"
+            ? data
+            : (obj?.message ?? obj?.delta ?? obj?.text ?? obj?.answer ?? "");
           if (typeof token === "string" && token.length > 0) {
             assembledText += token;
-            // Hint the TTS service to flush more frequently for lower latency
             const shouldFlush = /[\.!?\n]$/.test(token) || token.length >= 40;
             player.sendText(token, { flush: shouldFlush });
           }
@@ -348,46 +379,6 @@ export default function Home() {
     // Self-hosted assets for AudioWorklet and ORT WASM
     baseAssetPath: "/vad-web/",
     onnxWASMBasePath: "/onnx/",
-    getStream: async () => {
-      const needsNew = () => {
-        const s = sharedStreamRef.current;
-        if (!s) return true;
-        const tracks = s.getAudioTracks();
-        if (tracks.length === 0) return true;
-        const t = tracks[0];
-        return t.readyState !== "live" || t.muted === true || t.enabled === false;
-      };
-      if (needsNew()) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            echoCancellation: true,
-            autoGainControl: true,
-            noiseSuppression: true,
-          },
-        });
-        sharedStreamRef.current = stream;
-      }
-      return sharedStreamRef.current!;
-    },
-    pauseStream: async () => {
-      // Do not stop tracks; keep stream alive for reuse
-    },
-    resumeStream: async (s) => {
-      const tracks = s?.getAudioTracks?.() ?? [];
-      if (tracks.length > 0 && tracks[0].readyState === "live" && tracks[0].enabled !== false) return s;
-      // Reacquire if previous stream ended
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          autoGainControl: true,
-          noiseSuppression: true,
-        },
-      });
-      sharedStreamRef.current = stream;
-      return stream;
-    },
     onFrameProcessed: () => { /* debug disabled */ },
     onSpeechStart: () => {
       appendLog("VAD: speech detected (onSpeechStart)");
@@ -412,7 +403,7 @@ export default function Home() {
   // Diagnostics for vad-react state
   useEffect(() => {
     appendLog(`VAD loading=${vad.loading} listening=${vad.listening} userSpeaking=${vad.userSpeaking} errored=${vad.errored || false}`);
-  }, [vad.loading, vad.listening, vad.userSpeaking, vad.errored]);
+  }, [appendLog, vad.loading, vad.listening, vad.userSpeaking, vad.errored]);
 
   const startRecording = useCallback(async () => {
     const currentState = mediaRecorderRef.current?.state;
@@ -432,7 +423,10 @@ export default function Home() {
       ];
       let mediaRecorder: MediaRecorder | null = null;
       for (const t of preferredTypes) {
-        if ((window as any).MediaRecorder && (MediaRecorder as any).isTypeSupported?.(t)) {
+        const hasMediaRecorder = "MediaRecorder" in window;
+        type MediaRecorderStatic = typeof MediaRecorder & { isTypeSupported?: (mimeType: string) => boolean };
+        const MR = MediaRecorder as unknown as MediaRecorderStatic;
+        if (hasMediaRecorder && typeof MR.isTypeSupported === "function" && MR.isTypeSupported(t)) {
           try { mediaRecorder = new MediaRecorder(stream, { mimeType: t }); appendLog(`MediaRecorder using ${t}`); break; } catch {}
         }
       }
@@ -450,7 +444,11 @@ export default function Home() {
         appendLog("Recorder stopped. Dispatching blob to machine…");
         send({ type: "RECORDING_STOPPED", blob: audioBlob });
       };
-      mediaRecorder.onerror = (e: unknown) => { appendLog(`MediaRecorder error: ${String((e as any)?.error || e)}`); };
+      mediaRecorder.onerror = (e: unknown) => {
+        const possible = e as { error?: { message?: string } };
+        const msg = possible?.error?.message ?? String((possible as unknown as { error?: unknown })?.error ?? "Unknown MediaRecorder error");
+        appendLog(`MediaRecorder error: ${msg}`);
+      };
       mediaRecorder.start();
       setIsRecording(true);
       appendLog(`Recording started. state=${mediaRecorder.state}`);
@@ -460,7 +458,7 @@ export default function Home() {
       appendLog(`Microphone access error: ${err.message}`);
       console.error("Microphone access error", error);
     }
-  }, [appendLog, canRecord, isRecording, send]);
+  }, [appendLog, canRecord, isRecording, send, vad]);
 
   
 

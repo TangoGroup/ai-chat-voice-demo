@@ -148,9 +148,11 @@ export class TtsWsPlayer {
   sendText(text: string, opts?: { flush?: boolean; voiceSettings?: Partial<{ stability: number; similarity_boost: number; use_speaker_boost: boolean; style: number; speed: number; }> }) {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const msg: Record<string, unknown> = { text };
-    if (opts?.flush) (msg as any).flush = true;
-    if (opts?.voiceSettings) (msg as any).voice_settings = opts.voiceSettings;
+    type VoiceSettings = Partial<{ stability: number; similarity_boost: number; use_speaker_boost: boolean; style: number; speed: number; }>;
+    type OutboundMessage = { text: string; flush?: boolean; voice_settings?: VoiceSettings };
+    const msg: OutboundMessage = { text };
+    if (opts?.flush) msg.flush = true;
+    if (opts?.voiceSettings) msg.voice_settings = opts.voiceSettings;
     const payload = JSON.stringify(msg);
     if (this.opts.onLog) this.opts.onLog(`TTS WS -> text (${text.length} chars${opts?.flush ? ", flush" : ""})`);
     ws.send(payload);

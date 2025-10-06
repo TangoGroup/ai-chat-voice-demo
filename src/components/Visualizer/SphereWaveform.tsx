@@ -382,7 +382,8 @@ export function SphereWaveform(props: SphereWaveformProps) {
       timeAccRef.current = now;
       lastAdvanceRef.current = advanceCount;
     }
-    const dt = Math.max(0, now - prevNowRef.current);
+    const prev = prevNowRef.current ?? now;
+    const dt = Math.max(0, now - prev);
     prevNowRef.current = now;
 
     if (freezeTime) {
@@ -404,7 +405,7 @@ export function SphereWaveform(props: SphereWaveformProps) {
       u.uViewportWidth.value = stateFrame.size.width;
       u.uViewportHeight.value = stateFrame.size.height;
       const cam = stateFrame.camera as THREE.PerspectiveCamera;
-      if (cam && typeof (cam as any).fov === "number") {
+      if (cam && typeof (cam as THREE.PerspectiveCamera).fov === "number") {
         u.uFov.value = (cam.fov * Math.PI) / 180;
       }
       u.uVolume.value = THREE.MathUtils.clamp(volume, 0, 1);
