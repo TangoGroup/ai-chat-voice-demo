@@ -60,7 +60,8 @@ export async function POST(req: Request) {
         ...authHeader,
       },
       body: JSON.stringify({
-        // chat_id: chatId,
+        // Pass through chat identifier for threading if provided
+        ...(chatId ? { chat_id: chatId } : {}),
         query,
         sources_limit: 10,
         stream: Boolean(stream),

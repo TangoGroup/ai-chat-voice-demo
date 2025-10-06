@@ -240,7 +240,15 @@ export default function Home() {
         await player.connect();
       } catch (e) {
         appendLog(`TTS WS connect failed: ${(e as Error).message}. Falling back to REST TTS.`);
-        const aiResp = await fetch("/api/generateAnswerStream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: transcribedText, stream: false }) });
+        const aiResp = await fetch("/api/generateAnswerStream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: transcribedText,
+            stream: false,
+            ...(chatIdRef.current ? { chatId: chatIdRef.current } : {}),
+          }),
+        });
         const aiNetworkMs = sw.splitMs();
         appendLog(`AI response status: ${aiResp.status} (network: ${formatMs(aiNetworkMs)})`);
         const aiData = await aiResp.json();
@@ -410,7 +418,7 @@ export default function Home() {
     const currentState = mediaRecorderRef.current?.state;
     if (!canRecord || currentState === "recording" || currentState === "paused") return;
     try {
-      appendLog("Requesting microphone access…");
+      appendLog(`Requesting microphone access… (recState=${currentState ?? "none"}, isRecording=${isRecording})`);
       // Always reuse the same stream instance managed by vad.getStream
       try { vad.start(); } catch {}
       const stream = sharedStreamRef.current ?? await navigator.mediaDevices.getUserMedia({ audio: true });

@@ -155,4 +155,5 @@ VAD is `on` for all control states except `ready` and `error`.
 - The "New conversation" button now clears the stored chat ID; the next interaction captures a fresh `chat_id` from the start event.
 - Client logs surface the chat ID when captured and in AI request lifecycle.
 - Utilities in `src/lib/utils.ts`: `getStoredChatId`, `setChatId`, `clearChatId` (legacy generators retained but unused).
+- API behavior (2025-10-06): `/api/generateAnswerStream` forwards `chat_id` when provided; responses (SSE start or REST JSON) may include `chat_id` which the client stores for subsequent requests. The client includes `chatId` on all AI requests when available (including REST failover).
 

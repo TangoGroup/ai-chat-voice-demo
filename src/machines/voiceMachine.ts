@@ -74,11 +74,11 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       vizSpeaking: () => d.onVisualizerState("speaking"),
 
       // Lifecycle controls
-      startListeningInfra: () => d.onStartListening(),
-      stopAll: () => d.onStopAll(),
-      startCapture: () => d.startCapture(),
-      stopCapture: () => d.stopCapture(),
-      stopPlayback: () => d.stopPlayback(),
+      startListeningInfra: () => { d.log("machine: startListeningInfra"); d.onStartListening(); },
+      stopAll: () => { d.log("machine: stopAll"); d.onStopAll(); },
+      startCapture: () => { d.log("machine: startCapture"); d.startCapture(); },
+      stopCapture: () => { d.log("machine: stopCapture"); d.stopCapture(); },
+      stopPlayback: () => { d.log("machine: stopPlayback"); d.stopPlayback(); },
 
       // Context assignments
       storeRecordingBlob: assign(({ event }) => {
@@ -141,7 +141,7 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
           },
           listening_idle: {
             id: "control_listening_idle",
-            entry: ["turnVadOn", "vizListening"],
+            entry: ["turnVadOn", "vizListening", "startListeningInfra"],
             on: {
               STOP_ALL: { target: "ready", actions: "stopAll" },
               // Ensure any residual playback (e.g., WS TTS) is stopped when user interrupts from idle
