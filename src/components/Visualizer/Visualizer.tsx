@@ -11,7 +11,7 @@ type Tweened<T> = { current: T; target: T; start: number; duration: number };
 function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }
 function easeInOutCubic(t: number): number { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
 
-export function Visualizer({ logsRef }: { logsRef?: React.MutableRefObject<(msg: string) => void> }) {
+export function Visualizer({ logsRef, onHud }: { logsRef?: React.MutableRefObject<(msg: string) => void>; onHud?: (h: { state: string; mic: number; tts: number; eff: number }) => void }) {
   const [voiceState, setVoiceState] = useState<VoiceState>("passive");
   const { volume, start: startMic } = useMicAnalyzer({ smoothingTimeConstant: 0.8, fftSize: 1024 });
   const { theme } = useTheme();
@@ -128,7 +128,17 @@ export function Visualizer({ logsRef }: { logsRef?: React.MutableRefObject<(msg:
   // Theme-based color overrides
   const displayPointColor = useMemo(() => (theme === "dark" ? "#ffffff" : "#171717"), [theme]);
   const displayGlowColor = useMemo(() => (theme === "dark" ? "#ffffff" : "#171717"), [theme]);
-  const effectiveVolume = voiceState === "speaking" ? ttsVolume : volume;
+  // Use TTS volume only while speaking; otherwise use mic volume. Avoid overriding with near-silence.
+  const effectiveVolume = voiceState === "speaking" && ttsVolume > 0.02 ? ttsVolume : volume;
+
+  // On-screen HUD for debugging visual response
+  // Emit HUD to the in-app console sheet via callback
+  useEffect(() => {
+    const id = setInterval(() => {
+      try { onHud?.({ state: voiceState, mic: volume, tts: ttsVolume, eff: effectiveVolume }); } catch {}
+    }, 250);
+    return () => clearInterval(id);
+  }, [onHud, voiceState, volume, ttsVolume, effectiveVolume]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
 

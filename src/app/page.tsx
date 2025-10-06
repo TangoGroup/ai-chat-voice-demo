@@ -23,6 +23,7 @@ export default function Home() {
   const [canRecord, setCanRecord] = useState<boolean>(false);
   const { theme, toggle } = useTheme();
   const chatIdRef = useRef<string | null>(null);
+  const [hud, setHud] = useState<{ state: string; mic: number; tts: number; eff: number } | null>(null);
 
   // Shared mic stream and machine sender
   const sharedStreamRef = useRef<MediaStream | null>(null);
@@ -52,6 +53,10 @@ export default function Home() {
   }, []);
 
   const clearLogs = useCallback(() => { setLogs([]); }, []);
+  // Hook Visualizer into the in-app console HUD
+  const vizLogsRef = useRef<(msg: string) => void>(() => {});
+  useEffect(() => { vizLogsRef.current = appendLog; }, [appendLog]);
+
 
   const releaseSharedStream = useCallback(() => {
     if (sharedStreamRef.current) {
@@ -203,12 +208,47 @@ export default function Home() {
               const Ctx = getAudioContextCtor();
               if (!Ctx) return;
               const ctx: AudioContext = new Ctx();
+              // Ensure the AudioContext is running (some browsers start it suspended until resumed by user gesture)
+              try { void ctx.resume(); } catch {}
+              // Ensure the audio element is in the DOM so MediaElementAudioSourceNode reliably receives data
+              try {
+                const el = player.audio;
+                el.controls = false;
+                el.muted = false;
+                el.style.position = "fixed";
+                el.style.left = "-10000px";
+                el.style.width = "1px";
+                el.style.height = "1px";
+                if (!document.body.contains(el)) document.body.appendChild(el);
+              } catch {}
               const analyser = ctx.createAnalyser();
               analyser.fftSize = 1024;
               analyser.smoothingTimeConstant = 0.85;
-              const src = ctx.createMediaElementSource(player.audio);
-              src.connect(analyser);
-              analyser.connect(ctx.destination);
+              // Prefer captureStream for analyser input; fallback to MediaElementSource if unavailable
+              let analyserConnected = false;
+              try {
+                const cap: unknown = (player.audio as unknown as { captureStream?: () => MediaStream }).captureStream?.();
+                if (cap && cap instanceof MediaStream) {
+                  const ms = ctx.createMediaStreamSource(cap);
+                  ms.connect(analyser);
+                  analyserConnected = true;
+                  appendLog("TTS analyser: captureStream connected");
+                }
+              } catch (e) {
+                appendLog(`TTS analyser: captureStream error: ${(e as Error).message}`);
+              }
+              if (!analyserConnected) {
+                try {
+                  const src = ctx.createMediaElementSource(player.audio);
+                  src.connect(analyser);
+                  analyserConnected = true;
+                  appendLog("TTS analyser: MediaElementSource connected");
+                } catch (e) {
+                  appendLog(`TTS analyser: MediaElementSource error: ${(e as Error).message}`);
+                }
+              }
+              if (!analyserConnected) return;
+              // Do NOT route analyser to destination to avoid doubling audio and affecting VAD
               ttsAudioCtxRef.current = ctx;
               ttsAnalyserRef.current = analyser;
               const data = new Uint8Array(analyser.fftSize);
@@ -223,6 +263,8 @@ export default function Home() {
                   }
                   const rms = Math.sqrt(sum / data.length);
                   const vol = Math.min(1, Math.max(0, rms * 2.8));
+                  // Debug: observe analyser signal during TTS
+                  try { console.debug("tts analyser", { rms: Number(rms.toFixed(4)), vol: Number(vol.toFixed(4)) }); } catch {}
                   try {
                     type VoiceStateEventDetail = { state?: VoiceVisualState; ttsVolume?: number };
                     window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { ttsVolume: vol } }));
@@ -490,7 +532,7 @@ export default function Home() {
 
   return (
     <div className="min-h-dvh w-full">
-      <Visualizer />
+      <Visualizer logsRef={vizLogsRef} onHud={setHud} />
       <div className="fixed inset-x-0 z-50 flex justify-center bottom-12">
         <GlassButton
           aria-label={state.value.control === "ready" ? "Start listening" : "Stop"}
@@ -534,6 +576,7 @@ export default function Home() {
         isRecording={isRecording}
         onClear={clearLogs}
         textareaRef={consoleRef}
+        hud={hud}
         hideOverlay
       />
     </div>

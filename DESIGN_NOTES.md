@@ -146,6 +146,15 @@ VAD is `on` for all control states except `ready` and `error`.
   - Removed direct visualizer state manipulation in `page.tsx` for TTS start. Volume updates still emit `voice-state` for the visualizer.
 - Result: visualizer and control transitions are exclusively driven by machine events and actions for reproducibility.
 
+#### 2025-10-06: TTS-driven visualizer volume
+
+- Problem: Visualizer volume relied on machine `speaking` state timing; could miss early analyser frames.
+- Change:
+  - The page starts a Web Audio `AnalyserNode` on TTS first audio and dispatches `voice-state{ ttsVolume }` every RAF.
+  - The visualizer now prefers TTS volume when an analyser update arrived within the last ~200ms; otherwise it falls back to mic volume.
+  - When creating the `AudioContext`, we explicitly `resume()` it to ensure analyser runs under autoplay constraints.
+- Impact: Smoother, immediate visual response to ElevenLabs output irrespective of state transition timing.
+
 
 ### Chat Threading (2025-10-05)
 
