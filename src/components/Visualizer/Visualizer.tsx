@@ -131,6 +131,8 @@ export function Visualizer({ logsRef, onHud, micMuted }: { logsRef?: React.Mutab
   // If mic is muted, zero out mic contribution. While speaking, prefer TTS volume regardless of mic.
   const micVol = micMuted ? 0 : volume;
   const effectiveVolume = voiceState === "speaking" && ttsVolume > 0.02 ? ttsVolume : micVol;
+  // Combine state-configured baseline volume with live envelope and normalize to [0,1]
+  const visualVolume = Math.max(0, Math.min(1, (configNow.volume ?? 0) + effectiveVolume));
 
   // On-screen HUD for debugging visual response
   // Emit HUD to the in-app console sheet via callback
@@ -142,6 +144,7 @@ export function Visualizer({ logsRef, onHud, micMuted }: { logsRef?: React.Mutab
   }, [onHud, voiceState, volume, ttsVolume, effectiveVolume]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
+  console.log({micVol})
 
   return (
     <div ref={containerRef} className="fixed inset-0">
@@ -149,7 +152,7 @@ export function Visualizer({ logsRef, onHud, micMuted }: { logsRef?: React.Mutab
         <ambientLight intensity={0.2} />
         <group position={[0, 0, 0]}> 
           <SphereWaveform
-            volume={effectiveVolume}
+            volume={visualVolume}
             size={configNow.size ?? 1.0}
             vertexCount={configNow.vertexCount ?? 480}
             pointSize={configNow.pointSize ?? 0.04}

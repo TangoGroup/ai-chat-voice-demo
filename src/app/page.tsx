@@ -93,7 +93,7 @@ export default function Home() {
       appendLog("Starting listening…");
       try {
         // Do not pre-create chat; will capture chat_id from SSE/REST start
-        vad.start();
+        await vad.start();
         appendLog("VAD started");
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -325,16 +325,43 @@ export default function Home() {
   const vad = useMicVAD({
     model: "v5",
     startOnLoad: false,
-    // Relax thresholds to recommended defaults for easier detection
-    userSpeakingThreshold: 0.6,
-    positiveSpeechThreshold: 0.3,
-    negativeSpeechThreshold: 0.25,
-    redemptionMs: 1400,
-    minSpeechMs: 400,
+    // Relax thresholds for broader device variability
+    userSpeakingThreshold: 0.4,
+    positiveSpeechThreshold: 0.2,
+    negativeSpeechThreshold: 0.15,
+    redemptionMs: 1200,
+    minSpeechMs: 200,
     submitUserSpeechOnPause: true,
     // Self-hosted assets for AudioWorklet and ORT WASM
     baseAssetPath: "/vad-web/",
     onnxWASMBasePath: "/onnx/",
+    // Reuse a shared mic stream to guarantee a single permission prompt and stable source
+    getStream: async () => {
+      if (sharedStreamRef.current && sharedStreamRef.current.active) return sharedStreamRef.current;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          autoGainControl: true,
+          noiseSuppression: true,
+        },
+      });
+      sharedStreamRef.current = stream;
+      return stream;
+    },
+    pauseStream: async (stream: MediaStream) => {
+      try { stream.getTracks().forEach(t => t.stop()); } catch {}
+      if (sharedStreamRef.current === stream) sharedStreamRef.current = null;
+    },
+    resumeStream: async (stream: MediaStream) => {
+      // Reacquire if stopped
+      if (!stream.active) {
+        const s = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, autoGainControl: true, noiseSuppression: true } });
+        sharedStreamRef.current = s;
+        return s;
+      }
+      return stream;
+    },
     onFrameProcessed: () => { /* debug disabled */ },
     onSpeechStart: () => {
       appendLog("VAD: speech detected (onSpeechStart)");
