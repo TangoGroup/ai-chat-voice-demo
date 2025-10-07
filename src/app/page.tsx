@@ -488,6 +488,7 @@ export default function Home() {
             diameter={64}
             active={isMicMuted}
             blurClassName="backdrop-blur-md"
+            size="sm"
           >
             {isMicMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
           </GlassButton>
