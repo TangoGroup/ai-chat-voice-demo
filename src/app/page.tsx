@@ -324,11 +324,11 @@ export default function Home() {
     model: "v5",
     startOnLoad: false,
     // Relax thresholds to recommended defaults for easier detection
-    userSpeakingThreshold: 0.25,
+    userSpeakingThreshold: 0.6,
     positiveSpeechThreshold: 0.3,
-    negativeSpeechThreshold: 0.15,
-    redemptionMs: 800,
-    minSpeechMs: 250,
+    negativeSpeechThreshold: 0.25,
+    redemptionMs: 1400,
+    minSpeechMs: 400,
     submitUserSpeechOnPause: true,
     // Self-hosted assets for AudioWorklet and ORT WASM
     baseAssetPath: "/vad-web/",
