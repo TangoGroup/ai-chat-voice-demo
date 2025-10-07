@@ -59,6 +59,15 @@ export default function Home() {
   useEffect(() => { vizLogsRef.current = appendLog; }, [appendLog]);
 
 
+  // Optional: force ScriptProcessor fallback if AudioWorklet isn't pulling frames on this browser
+  const forceScriptProcessor = typeof window !== "undefined" && (process.env.NEXT_PUBLIC_VAD_DISABLE_WORKLET === "1" || process.env.NEXT_PUBLIC_VAD_DISABLE_WORKLET === "true");
+  if (forceScriptProcessor) {
+    try {
+      appendLog("VAD: forcing ScriptProcessor fallback (AudioWorklet disabled)");
+      (window as unknown as { AudioWorkletNode?: unknown }).AudioWorkletNode = undefined;
+    } catch {}
+  }
+
   const releaseSharedStream = useCallback(() => {
     if (sharedStreamRef.current) {
       try { sharedStreamRef.current.getTracks().forEach((t) => t.stop()); } catch {}
@@ -325,44 +334,23 @@ export default function Home() {
   const vad = useMicVAD({
     model: "v5",
     startOnLoad: false,
-    // Relax thresholds for broader device variability
-    userSpeakingThreshold: 0.4,
-    positiveSpeechThreshold: 0.2,
-    negativeSpeechThreshold: 0.15,
-    redemptionMs: 1200,
-    minSpeechMs: 200,
+    // Thresholds tuned for local behavior
+    userSpeakingThreshold: 0.6,
+    positiveSpeechThreshold: 0.3,
+    negativeSpeechThreshold: 0.25,
+    redemptionMs: 1400,
+    minSpeechMs: 400,
     submitUserSpeechOnPause: true,
     // Self-hosted assets for AudioWorklet and ORT WASM
     baseAssetPath: "/vad-web/",
     onnxWASMBasePath: "/onnx/",
-    // Reuse a shared mic stream to guarantee a single permission prompt and stable source
-    getStream: async () => {
-      if (sharedStreamRef.current && sharedStreamRef.current.active) return sharedStreamRef.current;
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          autoGainControl: true,
-          noiseSuppression: true,
-        },
-      });
-      sharedStreamRef.current = stream;
-      return stream;
-    },
-    pauseStream: async (stream: MediaStream) => {
-      try { stream.getTracks().forEach(t => t.stop()); } catch {}
-      if (sharedStreamRef.current === stream) sharedStreamRef.current = null;
-    },
-    resumeStream: async (stream: MediaStream) => {
-      // Reacquire if stopped
-      if (!stream.active) {
-        const s = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, autoGainControl: true, noiseSuppression: true } });
-        sharedStreamRef.current = s;
-        return s;
-      }
-      return stream;
-    },
-    onFrameProcessed: () => { /* debug disabled */ },
+    onFrameProcessed: (() => {
+      let c = 0;
+      return () => {
+        c += 1;
+        if ((c % 200) === 0) appendLog(`VAD frames processed: ${c}`);
+      };
+    })(),
     onSpeechStart: () => {
       appendLog("VAD: speech detected (onSpeechStart)");
       if (sendRef.current) {

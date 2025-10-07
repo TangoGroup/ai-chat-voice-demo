@@ -144,7 +144,6 @@ export function Visualizer({ logsRef, onHud, micMuted }: { logsRef?: React.Mutab
   }, [onHud, voiceState, volume, ttsVolume, effectiveVolume]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-  console.log({micVol})
 
   return (
     <div ref={containerRef} className="fixed inset-0">
