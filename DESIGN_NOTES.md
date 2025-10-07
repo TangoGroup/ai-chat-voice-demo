@@ -34,6 +34,22 @@ Develop a voice chat POC using custom AI API endpoints, ElevenLabs (11L), and a 
   - Removed custom Analyzer/RAF loop and thresholds.
   - `onStartListening` now calls `vad.start()`; `onStopAll` calls `vad.pause()` and releases the shared stream.
 
+### Cross-Origin Isolation (COI) for WebAssembly/AudioWorklet (2025-10-07)
+
+- Problem: VAD worked locally but not on Vercel; `crossOriginIsolated` was `false` in prod, leading to degraded/failing WASM/AudioWorklet behavior.
+- Decision: Enable COOP/COEP globally and mark static assets as same-origin to ensure COI.
+- Implementation:
+  - Added `headers()` in `next.config.ts` to send:
+    - `Cross-Origin-Opener-Policy: same-origin`
+    - `Cross-Origin-Embedder-Policy: require-corp`
+    - `Permissions-Policy: microphone=(self)`
+    - `Cross-Origin-Resource-Policy: same-origin` for `/vad-web/*` and `/onnx/*`
+    - Force `Content-Type: application/wasm` for `*.wasm`
+- Impact: `crossOriginIsolated === true` in production; ONNX Runtime can use proper wasm backends and AudioWorklet loads reliably. VAD detects speech as locally.
+- Caveats:
+  - All subresources must be CORP/COEP-compatible. Avoid embedding cross-origin iframes/scripts without proper headers.
+  - If hosting assets on a CDN, ensure it serves CORP headers and correct content-types for `.wasm`/`.onnx`.
+
 ### ElevenLabs Streaming Decision
 
 - Answer: Yes, ElevenLabs supports speaking from streamed text.
