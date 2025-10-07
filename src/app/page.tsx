@@ -82,11 +82,7 @@ export default function Home() {
     appendLog("Stopping recording…");
   }, [appendLog]);
 
-  // Helper: safe AudioContext constructor resolver for browsers that expose webkitAudioContext
-  const getAudioContextCtor = useCallback((): (typeof AudioContext) | null => {
-    const w = window as unknown as { webkitAudioContext?: typeof AudioContext; AudioContext?: typeof AudioContext };
-    return w.AudioContext ?? w.webkitAudioContext ?? null;
-  }, []);
+  // (removed) WebAudio context for TTS is managed inside TtsWsPlayer
   
 
   // Machine wiring must be created before callbacks that reference `send`
@@ -117,12 +113,7 @@ export default function Home() {
       try { ttsPlayerRef.current?.close(); } catch {}
       ttsPlayerRef.current = null;
       releaseSharedStream();
-      // Cleanup any TTS analyser
-      try { if (ttsRafRef.current) cancelAnimationFrame(ttsRafRef.current); } catch {}
-      ttsRafRef.current = null;
-      try { ttsAudioCtxRef.current?.close(); } catch {}
-      ttsAudioCtxRef.current = null;
-      ttsAnalyserRef.current = null;
+      // TTS WebAudio is managed inside TtsWsPlayer; nothing to clean here beyond closing player
     },
     startCapture: () => { void startRecording(); },
     stopCapture: () => { stopRecording(); },
@@ -200,94 +191,18 @@ export default function Home() {
         // Encourage faster time-to-first-audio with shorter initial chunk
         chunkLengthSchedule: [80, 120, 180, 240],
         onLog: appendLog,
+        onVolume: (vol: number) => {
+          try {
+            type VoiceStateEventDetail = { state?: VoiceVisualState; ttsVolume?: number };
+            window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { ttsVolume: vol } }));
+          } catch {}
+        },
         onFirstAudio: () => {
           // Notify state machine; it will drive the visualizer deterministically
           try { if (sendRef.current) sendRef.current({ type: "TTS_STARTED" }); } catch {}
-          try {
-            if (!ttsAudioCtxRef.current) {
-              const Ctx = getAudioContextCtor();
-              if (!Ctx) return;
-              const ctx: AudioContext = new Ctx();
-              // Ensure the AudioContext is running (some browsers start it suspended until resumed by user gesture)
-              try { void ctx.resume(); } catch {}
-              // Ensure the audio element is in the DOM so MediaElementAudioSourceNode reliably receives data
-              try {
-                const el = player.audio;
-                el.controls = false;
-                el.muted = false;
-                el.style.position = "fixed";
-                el.style.left = "-10000px";
-                el.style.width = "1px";
-                el.style.height = "1px";
-                if (!document.body.contains(el)) document.body.appendChild(el);
-              } catch {}
-              const analyser = ctx.createAnalyser();
-              analyser.fftSize = 1024;
-              analyser.smoothingTimeConstant = 0.85;
-              // Prefer captureStream for analyser input; fallback to MediaElementSource if unavailable
-              let analyserConnected = false;
-              try {
-                const cap: unknown = (player.audio as unknown as { captureStream?: () => MediaStream }).captureStream?.();
-                if (cap && cap instanceof MediaStream) {
-                  const ms = ctx.createMediaStreamSource(cap);
-                  ms.connect(analyser);
-                  analyserConnected = true;
-                  appendLog("TTS analyser: captureStream connected");
-                }
-              } catch (e) {
-                appendLog(`TTS analyser: captureStream error: ${(e as Error).message}`);
-              }
-              if (!analyserConnected) {
-                try {
-                  const src = ctx.createMediaElementSource(player.audio);
-                  src.connect(analyser);
-                  analyserConnected = true;
-                  appendLog("TTS analyser: MediaElementSource connected");
-                } catch (e) {
-                  appendLog(`TTS analyser: MediaElementSource error: ${(e as Error).message}`);
-                }
-              }
-              if (!analyserConnected) return;
-              // Do NOT route analyser to destination to avoid doubling audio and affecting VAD
-              ttsAudioCtxRef.current = ctx;
-              ttsAnalyserRef.current = analyser;
-              const data = new Uint8Array(analyser.fftSize);
-              const step = () => {
-                const a = ttsAnalyserRef.current;
-                if (a) {
-                  a.getByteTimeDomainData(data);
-                  let sum = 0;
-                  for (let i = 0; i < data.length; i += 1) {
-                    const v = (data[i] - 128) / 128;
-                    sum += v * v;
-                  }
-                  const rms = Math.sqrt(sum / data.length);
-                  const vol = Math.min(1, Math.max(0, rms * 2.8));
-                  // Debug: observe analyser signal during TTS
-                  try { console.debug("tts analyser", { rms: Number(rms.toFixed(4)), vol: Number(vol.toFixed(4)) }); } catch {}
-                  try {
-                    type VoiceStateEventDetail = { state?: VoiceVisualState; ttsVolume?: number };
-                    window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { ttsVolume: vol } }));
-                  } catch {}
-                }
-                ttsRafRef.current = requestAnimationFrame(step);
-              };
-              ttsRafRef.current = requestAnimationFrame(step);
-              appendLog("TTS analyser initialized");
-            }
-          } catch (e) {
-            appendLog(`TTS analyser error: ${(e as Error).message}`);
-          }
         },
         onFinal: () => {
-          // Cleanup analyser when TTS ends
-          if (ttsRafRef.current) {
-            cancelAnimationFrame(ttsRafRef.current);
-            ttsRafRef.current = null;
-          }
-          try { ttsAudioCtxRef.current?.close(); } catch {}
-          ttsAudioCtxRef.current = null;
-          ttsAnalyserRef.current = null;
+          // Player handles its own teardown
         },
         // Start with defaults; we can expose tuning later
       });
@@ -399,10 +314,7 @@ export default function Home() {
 
   // Keep a ref to the current audio to allow interruption
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
-  // TTS analyser refs
-  const ttsAudioCtxRef = useRef<AudioContext | null>(null);
-  const ttsAnalyserRef = useRef<AnalyserNode | null>(null);
-  const ttsRafRef = useRef<number | null>(null);
+  // TTS analyser handled inside TtsWsPlayer
   // TTS WS player and SSE abort controller for interruption
   const ttsPlayerRef = useRef<TtsWsPlayer | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);

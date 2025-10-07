@@ -155,6 +155,20 @@ VAD is `on` for all control states except `ready` and `error`.
   - When creating the `AudioContext`, we explicitly `resume()` it to ensure analyser runs under autoplay constraints.
 - Impact: Smoother, immediate visual response to ElevenLabs output irrespective of state transition timing.
 
+#### 2025-10-06: Regression and prevention notes (VAD + analyser)
+
+- Issue encountered: speech recognition stopped working while adding TTS analyser/hud. Root cause was audio being double-routed or analyser graph interfering with mic/VAD due to routing analyser to destination and/or binding to HTMLAudio with MSE.
+- Prevention:
+  - Do not connect analyser chains to `AudioContext.destination` unless explicitly required for playback.
+  - Avoid mixing MSE `MediaElementAudioSourceNode` routing with VAD microphone graph; prefer a single Web Audio graph for playback+metering.
+  - Keep TTS audio pipeline self-contained; no feedback into mic capture.
+  - When adding metering, use a dedicated analyser on the playback graph only.
+
+#### 2025-10-06: WebAudio TTS refactor
+
+- Change: replaced MSE-based playback in `TtsWsPlayer` with Web Audio decode+schedule pipeline and internal analyser. Exposed `onVolume(v:number)` for visualizer HUD and state.
+- Rationale: deterministic metering across platforms, no dependency on DOM audio element or captureStream, reduced routing pitfalls, simpler gain/ducking.
+
 
 ### Chat Threading (2025-10-05)
 

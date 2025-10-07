@@ -2,7 +2,8 @@
   ElevenLabs TTS WebSocket player
   - Connects to stream-input WS
   - Accepts incremental text via sendText
-  - Emits audio via MediaSource and starts playback on first chunk
+  - Emits audio via MediaSource (MSE) for reliable streaming playback
+  - Meters volume via Web Audio analyser (captureStream preferred; fallback to MediaElementSource)
 */
 
 export interface TtsWsPlayerOptions {
@@ -18,16 +19,23 @@ export interface TtsWsPlayerOptions {
   onLog?: (msg: string) => void;
   onFirstAudio?: () => void;
   onFinal?: () => void;
+  onVolume?: (v: number) => void;
 }
 
 export class TtsWsPlayer {
   private ws: WebSocket | null = null;
+  // MSE playback
   private mediaSource: MediaSource | null = null;
   private sourceBuffer: SourceBuffer | null = null;
   private pendingChunks: ArrayBuffer[] = [];
   private isBufferUpdating = false;
   private audioEl: HTMLAudioElement;
   private objectUrl: string | null = null;
+  // WebAudio metering
+  private audioCtx: AudioContext | null = null;
+  private gainNode: GainNode | null = null;
+  private analyserNode: AnalyserNode | null = null;
+  private rafId: number | null = null;
   private firstAudioResolved = false;
 
   constructor(private readonly opts: TtsWsPlayerOptions) {
@@ -35,19 +43,21 @@ export class TtsWsPlayer {
     this.audioEl.preload = "auto";
   }
 
-  get audio(): HTMLAudioElement { return this.audioEl; }
-
   async connect(): Promise<void> {
     const { voiceId, modelId, onLog } = this.opts;
     const url = `wss://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream-input?model_id=${encodeURIComponent(modelId)}`;
-    // Reset any prior session state
+    // Reset prior session state
+    this.endOfStream();
     this.teardownMedia("pre-connect");
+    this.teardownAudio("pre-connect");
     this.pendingChunks = [];
     this.isBufferUpdating = false;
     this.sourceBuffer = null;
     this.mediaSource = null;
+    this.objectUrl = null;
     this.firstAudioResolved = false;
-    // Feature detection for MSE with MP3
+
+    // Prepare MediaSource for MP3
     if (!("MediaSource" in window) || !(window as unknown as { MediaSource?: typeof MediaSource }).MediaSource) {
       throw new Error("MediaSource not supported in this browser");
     }
@@ -58,11 +68,23 @@ export class TtsWsPlayer {
     this.mediaSource = new MS();
     this.objectUrl = URL.createObjectURL(this.mediaSource);
     this.audioEl.src = this.objectUrl;
+    // Ensure element is configured for autoplay policies and available to the audio stack
+    try {
+      this.audioEl.controls = false;
+      (this.audioEl as unknown as { playsInline?: boolean }).playsInline = true as unknown as boolean;
+      this.audioEl.style.position = "fixed";
+      this.audioEl.style.left = "-10000px";
+      this.audioEl.style.width = "1px";
+      this.audioEl.style.height = "1px";
+      if (!document.body.contains(this.audioEl)) document.body.appendChild(this.audioEl);
+      // Prime autoplay: start muted; we'll unmute if we use element playback path
+      this.audioEl.muted = true;
+      void this.audioEl.play().catch(() => { /* muted autoplay should succeed */ });
+    } catch {}
     const sourceOpenPromise = new Promise<void>((resolve, reject) => {
       this.mediaSource!.addEventListener("sourceopen", () => {
         try {
           if (!this.mediaSource) return reject(new Error("MediaSource missing on sourceopen"));
-          // ElevenLabs WS returns MP3 frames; use audio/mpeg
           this.sourceBuffer = this.mediaSource.addSourceBuffer("audio/mpeg");
           this.sourceBuffer.mode = "sequence";
           this.sourceBuffer.addEventListener("updateend", () => {
@@ -115,8 +137,13 @@ export class TtsWsPlayer {
               this.enqueue(bytes);
               if (!this.firstAudioResolved) {
                 this.firstAudioResolved = true;
-                void this.audioEl.play().catch(() => { /* autoplay might be blocked; user gesture exists in flow */ });
-                if (onLog) onLog("TTS WS: first audio chunk received; playback started");
+                // Initialize analyser for HUD volume
+                try { this.ensureAnalyserForAudioEl(); } catch {}
+                // If we are using element playback (captureStream analyser path), unmute now
+                if (!this.gainNode) {
+                  try { this.audioEl.muted = false; } catch {}
+                }
+                if (onLog) onLog("TTS WS: first audio chunk received; playback started (MSE)");
                 try { this.opts.onFirstAudio?.(); } catch {}
               }
               // suppress per-chunk logs for noise reduction
@@ -141,7 +168,7 @@ export class TtsWsPlayer {
         reject(err);
       }
     });
-    // Ensure both WS and SourceBuffer are ready; throw to allow REST fallback
+    // Ensure both WS and SourceBuffer are ready
     await Promise.all([wsOpenPromise, sourceOpenPromise]);
   }
 
@@ -168,6 +195,7 @@ export class TtsWsPlayer {
     try { this.ws?.close(); } catch {}
     this.ws = null;
     this.endOfStream();
+    this.teardownAudio("close");
     this.teardownMedia("close");
   }
 
@@ -188,13 +216,92 @@ export class TtsWsPlayer {
     }
   }
 
+  private ensureAnalyserForAudioEl(): void {
+    if (this.analyserNode) return;
+    try {
+      const AC = (window as unknown as { webkitAudioContext?: typeof AudioContext; AudioContext?: typeof AudioContext }).AudioContext
+        || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AC) return;
+      const ctx = new AC();
+      void ctx.resume().catch(() => {});
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.85;
+      let connected = false;
+      // Preferred: captureStream -> analyser (do not route to destination)
+      try {
+        const cap: unknown = (this.audioEl as unknown as { captureStream?: () => MediaStream }).captureStream?.();
+        if (cap && cap instanceof MediaStream) {
+          const ms = ctx.createMediaStreamSource(cap);
+          ms.connect(analyser);
+          connected = true;
+        }
+      } catch {}
+      if (!connected) {
+        // Fallback: route MediaElementSource via gain to destination and analyser, mute element to avoid double audio
+        try {
+          const src = ctx.createMediaElementSource(this.audioEl);
+          const gain = ctx.createGain();
+          this.audioEl.muted = true;
+          src.connect(gain);
+          gain.connect(analyser);
+          gain.connect(ctx.destination);
+          this.gainNode = gain;
+          connected = true;
+        } catch {}
+      }
+      if (!connected) return;
+      this.audioCtx = ctx;
+      this.analyserNode = analyser;
+      this.startRaf();
+    } catch {
+      // ignore
+    }
+  }
+
+  private startRaf() {
+    const an = this.analyserNode;
+    if (!an) return;
+    const data = new Uint8Array(an.fftSize);
+    const step = () => {
+      try {
+        an.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 1) {
+          const v = (data[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        const vol = Math.min(1, Math.max(0, rms * 2.8));
+        try { this.opts.onVolume?.(vol); } catch {}
+      } catch {}
+      this.rafId = requestAnimationFrame(step);
+    };
+    this.rafId = requestAnimationFrame(step);
+  }
+
   private endOfStream() {
+    if (this.rafId) { try { cancelAnimationFrame(this.rafId); } catch {} this.rafId = null; }
     if (this.mediaSource && this.mediaSource.readyState === "open") {
       try { this.mediaSource.endOfStream(); } catch {}
     }
   }
 
-  private teardownMedia(reason: string) {
+  private teardownAudio(_reason: string) {
+    try {
+      if (this.rafId) { try { cancelAnimationFrame(this.rafId); } catch {} this.rafId = null; }
+      try { this.analyserNode?.disconnect(); } catch {}
+      this.analyserNode = null;
+      try { this.gainNode?.disconnect(); } catch {}
+      this.gainNode = null;
+      try { this.audioCtx?.close(); } catch {}
+      this.audioCtx = null;
+    } catch {
+      // ignore
+    }
+  }
+
+  private teardownMedia(_reason: string) {
     try {
       if (this.sourceBuffer) {
         try { this.sourceBuffer.abort(); } catch {}
@@ -210,7 +317,7 @@ export class TtsWsPlayer {
         try { URL.revokeObjectURL(this.objectUrl); } catch {}
       }
       this.objectUrl = null;
-      // Reset audio element to ensure new MSE pipeline can be attached next session
+      // Reset audio element
       try { this.audioEl.pause(); } catch {}
       this.audioEl.removeAttribute("src");
       try { this.audioEl.load(); } catch {}
