@@ -13,7 +13,7 @@ function easeInOutCubic(t: number): number { return t < 0.5 ? 4 * t * t * t : 1 
 
 export function Visualizer({ logsRef, onHud, micMuted }: { logsRef?: React.MutableRefObject<(msg: string) => void>; onHud?: (h: { state: string; mic: number; tts: number; eff: number }) => void; micMuted?: boolean }) {
   const [voiceState, setVoiceState] = useState<VoiceState>("passive");
-  const { volume, start: startMic } = useMicAnalyzer({ smoothingTimeConstant: 0.8, fftSize: 1024 });
+  const { volume, start: startMic } = useMicAnalyzer({ smoothingTimeConstant: 0.8, fftSize: 1024, muted: Boolean(micMuted) });
   const { theme } = useTheme();
   const [ttsVolume, setTtsVolume] = useState<number>(0);
 
@@ -130,9 +130,7 @@ export function Visualizer({ logsRef, onHud, micMuted }: { logsRef?: React.Mutab
   const displayGlowColor = useMemo(() => (theme === "dark" ? "#ffffff" : "#171717"), [theme]);
   // If mic is muted, zero out mic contribution. While speaking, prefer TTS volume regardless of mic.
   const micVol = micMuted ? 0 : volume;
-  // TODO: this doesn't currently work
-  // const effectiveVolume = voiceState === "speaking" && ttsVolume > 0.02 ? ttsVolume : micVol;
-  const effectiveVolume = micVol;
+  const effectiveVolume = voiceState === "speaking" && ttsVolume > 0.02 ? ttsVolume : micVol;
 
   // On-screen HUD for debugging visual response
   // Emit HUD to the in-app console sheet via callback

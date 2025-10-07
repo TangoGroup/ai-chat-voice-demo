@@ -44,7 +44,7 @@ export async function POST(req: Request) {
 
     const sttLanguage = process.env.ELEVENLABS_STT_LANGUAGE;
     if (sttLanguage) {
-      upstreamForm.append("language", sttLanguage);
+      upstreamForm.append("languageCode", sttLanguage);
     }
 
     const upstream = await fetch(elevenUrl, {
