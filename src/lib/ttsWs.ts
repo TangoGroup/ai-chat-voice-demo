@@ -37,6 +37,7 @@ export class TtsWsPlayer {
   private analyserNode: AnalyserNode | null = null;
   private rafId: number | null = null;
   private firstAudioResolved = false;
+  private desiredMuted = false;
 
   constructor(private readonly opts: TtsWsPlayerOptions) {
     this.audioEl = new Audio();
@@ -77,7 +78,7 @@ export class TtsWsPlayer {
       this.audioEl.style.width = "1px";
       this.audioEl.style.height = "1px";
       if (!document.body.contains(this.audioEl)) document.body.appendChild(this.audioEl);
-      // Prime autoplay: start muted; we'll unmute if we use element playback path
+      // Prime autoplay in Safari: start muted and call play() immediately; we'll unmute on first audio
       this.audioEl.muted = true;
       void this.audioEl.play().catch(() => { /* muted autoplay should succeed */ });
     } catch {}
@@ -139,10 +140,8 @@ export class TtsWsPlayer {
                 this.firstAudioResolved = true;
                 // Initialize analyser for HUD volume
                 try { this.ensureAnalyserForAudioEl(); } catch {}
-                // If we are using element playback (captureStream analyser path), unmute now
-                if (!this.gainNode) {
-                  try { this.audioEl.muted = false; } catch {}
-                }
+                // Unmute now that audio has started; element is already playing muted
+                try { this.audioEl.muted = this.desiredMuted; } catch {}
                 if (onLog) onLog("TTS WS: first audio chunk received; playback started (MSE)");
                 try { this.opts.onFirstAudio?.(); } catch {}
               }
@@ -227,36 +226,25 @@ export class TtsWsPlayer {
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.85;
-      let connected = false;
-      // Preferred: captureStream -> analyser (do not route to destination)
-      try {
-        const cap: unknown = (this.audioEl as unknown as { captureStream?: () => MediaStream }).captureStream?.();
-        if (cap && cap instanceof MediaStream) {
-          const ms = ctx.createMediaStreamSource(cap);
-          ms.connect(analyser);
-          connected = true;
-        }
-      } catch {}
-      if (!connected) {
-        // Fallback: route MediaElementSource via gain to destination and analyser, mute element to avoid double audio
-        try {
-          const src = ctx.createMediaElementSource(this.audioEl);
-          const gain = ctx.createGain();
-          this.audioEl.muted = true;
-          src.connect(gain);
-          gain.connect(analyser);
-          gain.connect(ctx.destination);
-          this.gainNode = gain;
-          connected = true;
-        } catch {}
-      }
-      if (!connected) return;
+      // Safari-safe routing: use element for playback, analyser only in WebAudio graph.
+      // Do NOT connect to destination to avoid double playback and muting side effects.
+      const src = ctx.createMediaElementSource(this.audioEl);
+      src.connect(analyser);
+      this.gainNode = null;
       this.audioCtx = ctx;
       this.analyserNode = analyser;
       this.startRaf();
     } catch {
       // ignore
     }
+  }
+
+  /**
+   * Mute or unmute playback. Applies to both element-based and WebAudio gain paths.
+   */
+  public setMuted(muted: boolean): void {
+    this.desiredMuted = muted;
+    try { this.audioEl.muted = muted; } catch {}
   }
 
   private startRaf() {

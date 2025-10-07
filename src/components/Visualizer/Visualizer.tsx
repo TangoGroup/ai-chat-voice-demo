@@ -11,7 +11,7 @@ type Tweened<T> = { current: T; target: T; start: number; duration: number };
 function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }
 function easeInOutCubic(t: number): number { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
 
-export function Visualizer({ logsRef, onHud }: { logsRef?: React.MutableRefObject<(msg: string) => void>; onHud?: (h: { state: string; mic: number; tts: number; eff: number }) => void }) {
+export function Visualizer({ logsRef, onHud, micMuted }: { logsRef?: React.MutableRefObject<(msg: string) => void>; onHud?: (h: { state: string; mic: number; tts: number; eff: number }) => void; micMuted?: boolean }) {
   const [voiceState, setVoiceState] = useState<VoiceState>("passive");
   const { volume, start: startMic } = useMicAnalyzer({ smoothingTimeConstant: 0.8, fftSize: 1024 });
   const { theme } = useTheme();
@@ -128,8 +128,11 @@ export function Visualizer({ logsRef, onHud }: { logsRef?: React.MutableRefObjec
   // Theme-based color overrides
   const displayPointColor = useMemo(() => (theme === "dark" ? "#ffffff" : "#171717"), [theme]);
   const displayGlowColor = useMemo(() => (theme === "dark" ? "#ffffff" : "#171717"), [theme]);
-  // Use TTS volume only while speaking; otherwise use mic volume. Avoid overriding with near-silence.
-  const effectiveVolume = voiceState === "speaking" && ttsVolume > 0.02 ? ttsVolume : volume;
+  // If mic is muted, zero out mic contribution. While speaking, prefer TTS volume regardless of mic.
+  const micVol = micMuted ? 0 : volume;
+  // TODO: this doesn't currently work
+  // const effectiveVolume = voiceState === "speaking" && ttsVolume > 0.02 ? ttsVolume : micVol;
+  const effectiveVolume = micVol;
 
   // On-screen HUD for debugging visual response
   // Emit HUD to the in-app console sheet via callback

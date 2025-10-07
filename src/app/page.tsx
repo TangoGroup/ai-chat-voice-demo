@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMicVAD } from "@ricky0123/vad-react";
-import { Square, Sun, Moon, Speech, SquarePen } from "lucide-react";
+import { Square, Sun, Moon, Speech, SquarePen, Mic, MicOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Visualizer from "@/components/Visualizer/Visualizer";
 import { useTheme } from "@/components/Theme/ThemeProvider";
@@ -17,6 +17,7 @@ import ConsolePanel from "@/components/Console/ConsolePanel";
 export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [isMicMuted, setIsMicMuted] = useState<boolean>(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const consoleRef = useRef<HTMLTextAreaElement | null>(null);
@@ -206,6 +207,7 @@ export default function Home() {
         },
         // Start with defaults; we can expose tuning later
       });
+      // No output mute here; mic mute handled via VAD pause/resume
 
       try {
         await player.connect();
@@ -444,25 +446,52 @@ export default function Home() {
 
   return (
     <div className="min-h-dvh w-full">
-      <Visualizer logsRef={vizLogsRef} onHud={setHud} />
-      <div className="fixed inset-x-0 z-50 flex justify-center bottom-12">
-        <GlassButton
-          aria-label={state.value.control === "ready" ? "Start listening" : "Stop"}
-          onClick={() => {
-            appendLog(`Button click: control=${state.value.control}`);
-            if (state.value.control === "ready") {
-              appendLog("Dispatch START_LISTENING");
-              send({ type: "START_LISTENING" });
-            } else {
-              appendLog("Dispatch STOP_ALL");
-              send({ type: "STOP_ALL" });
-            }
-          }}
-          diameter={112}
-          active={state.value.control !== "ready" && state.value.control !== "error"}
-        >
-          {state.value.control !== "ready" && state.value.control !== "error" ? <Square className="h-6 w-6" /> : <Speech className="h-6 w-6" />}
-        </GlassButton>
+      <Visualizer logsRef={vizLogsRef} onHud={setHud} micMuted={isMicMuted} />
+      <div className="fixed inset-x-0 z-50 bottom-12">
+        <div className="flex items-center justify-center gap-8">
+          <GlassButton
+            aria-label={state.value.control === "ready" ? "Start listening" : "Stop"}
+            onClick={() => {
+              appendLog(`Button click: control=${state.value.control}`);
+              if (state.value.control === "ready") {
+                appendLog("Dispatch START_LISTENING");
+                send({ type: "START_LISTENING" });
+              } else {
+                appendLog("Dispatch STOP_ALL");
+                send({ type: "STOP_ALL" });
+              }
+            }}
+            diameter={112}
+            active={state.value.control !== "ready" && state.value.control !== "error"}
+          >
+            {state.value.control !== "ready" && state.value.control !== "error" ? <Square className="h-6 w-6" /> : <Speech className="h-6 w-6" />}
+          </GlassButton>
+
+          <GlassButton
+            aria-label={isMicMuted ? "Unmute mic" : "Mute mic"}
+            onClick={() => {
+              const next = !isMicMuted;
+              setIsMicMuted(next);
+              if (next) {
+                appendLog("Mic muted (VAD paused)");
+                try { vad.pause(); } catch {}
+                // Stop any ongoing capture immediately
+                try { stopRecording(); } catch {}
+              } else {
+                appendLog("Mic unmuted (VAD resumed)");
+                // Only resume VAD if we are in an active listening flow
+                if (state.value.control !== "ready" && state.value.control !== "error") {
+                  try { vad.start(); } catch {}
+                }
+              }
+            }}
+            diameter={64}
+            active={isMicMuted}
+            blurClassName="backdrop-blur-md"
+          >
+            {isMicMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+          </GlassButton>
+        </div>
       </div>
       <div className="fixed top-4 right-4 z-50 flex gap-2">
         <Button
