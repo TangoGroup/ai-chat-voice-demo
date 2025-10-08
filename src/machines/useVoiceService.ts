@@ -21,6 +21,9 @@ export function useVoiceService(deps: Parameters<typeof createVoiceMachine>[0]) 
     audioBuffer: null,
     error: null,
     recordingBlob: null,
+    isStreaming: false,
+    streamSseDone: false,
+    streamTtsDone: false,
   };
   const [snapshot, setSnapshot] = useState<VoiceSnapshot>({ value: { control: "ready", vad: "off" }, context: initialContext });
 
