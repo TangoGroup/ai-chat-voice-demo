@@ -10,7 +10,7 @@ import { useTheme } from "@/components/Theme/ThemeProvider";
 import { createStopwatch, formatMs, getStoredChatId, setChatId, clearChatId } from "@/lib/utils";
 import { TtsWsPlayer } from "@/lib/ttsWs";
 import { streamSSE } from "@/lib/sse";
-import { useChat } from "@/lib/chat";
+import { useChat, type ChatMessage } from "@/lib/chat";
 import { GlassButton } from "@/components/ui/glass-button";
 import { useQueryClient } from "@tanstack/react-query";
 import { type VoiceVisualState } from "@/machines/voiceMachine";
@@ -30,7 +30,7 @@ export default function Home() {
   const chatIdRef = useRef<string | null>(null);
   const queryClient = useQueryClient();
   // Chat history via React Query + localStorage (client-side context)
-  const { messages, sendMessage, setMessages } = useChat(chatIdRef.current ?? "default", undefined);
+  const { messages, setMessages } = useChat(chatIdRef.current ?? "default", undefined);
   const [hud, setHud] = useState<{ state: string; mic: number; tts: number; eff: number } | null>(null);
 
   // Shared mic stream and machine sender
@@ -234,9 +234,9 @@ export default function Home() {
       ttsPlayerRef.current = player;
       let assembledText = "";
       // Seed chat with user + placeholder assistant locally (no extra network)
-      const seedBase = messages.length === 0 ? [{ role: "system", content: "" } as const] : [];
-      let currentMsgs: any[] = [...seedBase, ...messages as any, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
-      try { setMessages(currentMsgs as any); } catch {}
+      const seedBase: ReadonlyArray<ChatMessage> = messages.length === 0 ? [{ role: "system", content: "" }] : [];
+      let currentMsgs: ChatMessage[] = [...seedBase, ...messages, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
+      try { setMessages(currentMsgs); } catch {}
       // Debug: outbound SSE request summary
       try { appendLog(`AI SSE request → messages=${currentMsgs.length - 1}`); } catch {}
       await streamSSE("/api/generateAnswerStreamOpenRouter", {
@@ -246,8 +246,8 @@ export default function Home() {
           stream: true,
           ...(chatIdRef.current ? { chatId: chatIdRef.current } : {}),
           messages: (() => {
-            const base = messages.length === 0 ? [{ role: "system", content: "" } as const] : [];
-            const withUser = [...base, ...messages as any, { role: "user", content: transcribedText }];
+            const base: ReadonlyArray<ChatMessage> = messages.length === 0 ? [{ role: "system", content: "" }] : [];
+            const withUser: ChatMessage[] = [...base, ...messages, { role: "user", content: transcribedText }];
             return withUser.slice(-24); // crude trim here; exact trim done server-side too
           })(),
         }),
@@ -274,7 +274,7 @@ export default function Home() {
             return;
           }
           if (eventType === "error") {
-            const msg = (typeof data === "object" && data && "message" in (data as any)) ? (data as any).message : (obj?.message ?? "unknown");
+            const msg = (typeof data === "object" && data && "message" in (data as Record<string, unknown>)) ? String((data as Record<string, unknown>).message) : (obj?.message ?? "unknown");
             appendLog(`SSE error event: ${String(msg)}`);
             return;
           }
@@ -296,9 +296,9 @@ export default function Home() {
               const next = currentMsgs.slice();
               const last = next[next.length - 1];
               if (last && last.role === "assistant") {
-                next[next.length - 1] = { role: "assistant", content: (last.content || "") + token } as any;
+                next[next.length - 1] = { role: "assistant", content: (last.content || "") + token };
                 currentMsgs = next;
-                setMessages(next as any);
+                setMessages(next);
               }
             } catch {}
           }
@@ -390,8 +390,8 @@ export default function Home() {
 
     // Seed chat: add user message and placeholder assistant
     const seedBase = messages.length === 0 ? [{ role: "system", content: "" } as const] : [];
-    let currentMsgs: ReadonlyArray<{ role: "system" | "user" | "assistant"; content: string }> = [...seedBase as any, ...messages as any, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
-    try { setMessages(currentMsgs as any); } catch {}
+    let currentMsgs: ChatMessage[] = [...seedBase, ...messages, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
+    try { setMessages(currentMsgs); } catch {}
 
     await streamSSE("/api/generateAnswerStreamOpenRouter", {
       method: "POST",
@@ -400,8 +400,8 @@ export default function Home() {
         stream: true,
         ...(chatIdRef.current ? { chatId: chatIdRef.current } : {}),
         messages: (() => {
-          const base = messages.length === 0 ? [{ role: "system", content: "" } as const] : [];
-          const withUser = [...base, ...messages as any, { role: "user", content: transcribedText }];
+          const base: ReadonlyArray<ChatMessage> = messages.length === 0 ? [{ role: "system", content: "" }] : [];
+          const withUser: ChatMessage[] = [...base, ...messages, { role: "user", content: transcribedText }];
           return withUser.slice(-24);
         })(),
       }),
@@ -437,11 +437,11 @@ export default function Home() {
           // Update assistant message incrementally
           try {
             const next = currentMsgs.slice();
-            const last = next[next.length - 1] as { role: string; content: string };
+            const last = next[next.length - 1];
             if (last && last.role === "assistant") {
-              (next as any)[next.length - 1] = { role: "assistant", content: (last.content || "") + token };
-              currentMsgs = next as any;
-              setMessages(next as any);
+              next[next.length - 1] = { role: "assistant", content: (last.content || "") + token };
+              currentMsgs = next;
+              setMessages(next);
             }
           } catch {}
         }

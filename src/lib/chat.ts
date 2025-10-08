@@ -30,7 +30,7 @@ export function useChat(chatId: string, system?: string) {
 
   const send = useMutation({
     mutationFn: async (userText: string) => {
-      const start = [...messages, { role: "user", content: userText }, { role: "assistant", content: "" }];
+      const start: ChatMessage[] = [...messages, { role: "user", content: userText }, { role: "assistant", content: "" }];
       set(start);
 
       const resp = await fetch("/api/generateAnswerStreamOpenRouter", {

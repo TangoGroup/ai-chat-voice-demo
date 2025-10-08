@@ -65,7 +65,8 @@ export async function POST(req: Request) {
         headers,
         body: JSON.stringify({ model: selectedModel, messages, stream: true, temperature: temperatureVal, max_tokens: maxTokensVal }),
       });
-      if (!upstream.ok || !upstream.body) {
+      const upstreamBody = upstream.body;
+      if (!upstream.ok || !upstreamBody) {
         let errText = ""; try { errText = await upstream.text(); } catch {}
         console.error("OpenRouter upstream error", upstream.status, errText);
         return NextResponse.json({ error: `OpenRouter error ${upstream.status}` }, { status: 502 });
@@ -76,7 +77,7 @@ export async function POST(req: Request) {
         start: async (controller) => {
           // Emit a synthetic start event; forward provided chatId for client persistence
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: "start", chat_id: chatId || undefined })}\n\n`));
-          const reader = upstream.body.getReader();
+          const reader = upstreamBody.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
           let tokenCount = 0;
@@ -96,12 +97,13 @@ export async function POST(req: Request) {
                   const payload = line.slice(5).trim();
                   if (!payload || payload === "[DONE]") continue;
                   try {
-                    const j = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string; reasoning?: any } }>; error?: unknown };
-                    const d = j?.choices?.[0]?.delta ?? {} as any;
+                    const j = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string; reasoning?: unknown } }>; error?: unknown };
+                    const d = (j?.choices?.[0]?.delta ?? {}) as { content?: string; reasoning?: unknown };
                     const content: string = typeof d.content === "string" ? d.content : "";
-                    const reasoningToken: string = typeof d.reasoning === "string"
-                      ? d.reasoning
-                      : (typeof d.reasoning?.content === "string" ? d.reasoning.content : "");
+                    const r = d.reasoning;
+                    const reasoningToken: string = typeof r === "string"
+                      ? r
+                      : (r && typeof r === "object" && "content" in r && typeof (r as { content?: unknown }).content === "string" ? (r as { content?: string }).content ?? "" : "");
                     if (includeReasoning && reasoningToken) {
                       controller.enqueue(encoder.encode(`data: ${JSON.stringify({ event: "reasoning", delta: reasoningToken })}\n\n`));
                     }
