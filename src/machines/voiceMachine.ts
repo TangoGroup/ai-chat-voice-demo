@@ -199,8 +199,8 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             id: "control_processing",
             entry: ["vizThinking"],
             on: {
-              // Interrupt: immediately return to listening (keep VAD on)
-              STOP_ALL: { target: "listening_idle", actions: ["stopPlayback", "startListeningInfra"] },
+              // Stop entirely from any state
+              STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture"] },
               TTS_STARTED: { actions: ["vizSpeaking", "markStreamingOn"] },
               TTS_ENDED: { actions: "markTtsDone" },
@@ -224,8 +224,8 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
           speaking_streaming: {
             entry: ["vizSpeaking"],
             on: {
-              // Interrupt: immediately return to listening (keep VAD on)
-              STOP_ALL: { target: "listening_idle", actions: ["stopPlayback", "startListeningInfra", "clearStreaming"] },
+              // Stop entirely from any state
+              STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture", "clearStreaming"] },
               TTS_ENDED: { target: "listening_idle", actions: "clearStreaming" },
               // When actual audio playback finishes, return immediately
@@ -235,8 +235,8 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
           playing: {
             entry: ["vizSpeaking"],
             on: {
-              // Interrupt: immediately return to listening (keep VAD on)
-              STOP_ALL: { target: "listening_idle", actions: ["stopPlayback", "startListeningInfra"] },
+              // Stop entirely from any state
+              STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture"] },
               AUDIO_ENDED: {
                 target: "listening_idle",
