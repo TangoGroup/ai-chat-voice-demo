@@ -9,6 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@steelbrain/media-ingest-audio": "^1.0.0",
+    "@steelbrain/media-speech-detection-web": "^1.0.0",
     "@radix-ui/react-avatar": "^1.1.10",
     "@radix-ui/react-dialog": "^1.1.5",
     "@radix-ui/react-scroll-area": "^1.2.10",

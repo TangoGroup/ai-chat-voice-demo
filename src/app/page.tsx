@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useMicVAD } from "@ricky0123/vad-react";
+import { speechFilter, preloadModel } from "@steelbrain/media-speech-detection-web";
+import { ingestAudioStream, RECOMMENDED_AUDIO_CONSTRAINTS } from "@steelbrain/media-ingest-audio";
 import { Square, Sun, Moon, Speech, SquarePen, Mic, MicOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Visualizer from "@/components/Visualizer/Visualizer";
@@ -58,15 +59,19 @@ export default function Home() {
   const vizLogsRef = useRef<(msg: string) => void>(() => {});
   useEffect(() => { vizLogsRef.current = appendLog; }, [appendLog]);
 
-
-  // Optional: force ScriptProcessor fallback if AudioWorklet isn't pulling frames on this browser
-  const forceScriptProcessor = typeof window !== "undefined" && (process.env.NEXT_PUBLIC_VAD_DISABLE_WORKLET === "1" || process.env.NEXT_PUBLIC_VAD_DISABLE_WORKLET === "true");
-  if (forceScriptProcessor) {
-    try {
-      appendLog("VAD: forcing ScriptProcessor fallback (AudioWorklet disabled)");
-      (window as unknown as { AudioWorkletNode?: unknown }).AudioWorkletNode = undefined;
-    } catch {}
-  }
+  // VAD model preload using library helper
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await preloadModel();
+        if (!cancelled) appendLog("VAD model preloaded");
+      } catch (e) {
+        if (!cancelled) appendLog(`VAD preload failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [appendLog]);
 
   const releaseSharedStream = useCallback(() => {
     if (sharedStreamRef.current) {
@@ -101,7 +106,7 @@ export default function Home() {
       if (!canRecord) return;
       appendLog("Starting listening…");
       try {
-        // Do not pre-create chat; will capture chat_id from SSE/REST start
+        // Ensure mic is available and start VAD detection
         await vad.start();
         appendLog("VAD started");
       } catch (e) {
@@ -330,59 +335,58 @@ export default function Home() {
   const ttsPlayerRef = useRef<TtsWsPlayer | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);
 
-  // Initialize VAD using vad-react
-  const vad = useMicVAD({
-    model: "v5",
-    startOnLoad: false,
-    // Thresholds tuned for local behavior
-    userSpeakingThreshold: 0.6,
-    positiveSpeechThreshold: 0.3,
-    negativeSpeechThreshold: 0.25,
-    redemptionMs: 1400,
-    minSpeechMs: 400,
-    submitUserSpeechOnPause: true,
-    // Self-hosted assets for AudioWorklet and ORT WASM
-    baseAssetPath: "/vad-web/",
-    onnxWASMBasePath: "/onnx/",
-    onFrameProcessed: (() => {
-      let c = 0;
-      return () => {
-        c += 1;
-        if ((c % 200) === 0) appendLog(`VAD frames processed: ${c}`);
-      };
-    })(),
-    onSpeechStart: () => {
-      appendLog("VAD: speech detected (onSpeechStart)");
-      if (sendRef.current) {
-        sendRef.current({ type: "VAD_SPEECH_START" });
-      } else {
-        appendLog("VAD: sendRef null; dropping VAD_SPEECH_START");
+  // Steelbrain VAD controller
+  const vadAbortRef = useRef<AbortController | null>(null);
+  const vad = useMemo(() => ({
+    start: async () => {
+      // no-op if already running
+      if (vadAbortRef.current) return;
+      // Ensure mic stream
+      const stream = sharedStreamRef.current ?? await navigator.mediaDevices.getUserMedia({ audio: RECOMMENDED_AUDIO_CONSTRAINTS, video: false });
+      if (!sharedStreamRef.current) sharedStreamRef.current = stream;
+      // Build ingest and VAD pipeline
+      const audioStream = await ingestAudioStream(stream);
+      const aborter = new AbortController();
+      vadAbortRef.current = aborter;
+      const vadTransform = speechFilter({
+        threshold: 0.5,
+        minSpeechDurationMs: 400,
+        redemptionDurationMs: 1400,
+        lookBackDurationMs: 384,
+        noEmit: true,
+        onSpeechStart: () => {
+          appendLog("VAD: speech detected (start)");
+          try { sendRef.current?.({ type: "VAD_SPEECH_START" }); } catch {}
+        },
+        onSpeechEnd: () => {
+          appendLog("VAD: speech ended (end)");
+          try { sendRef.current?.({ type: "VAD_SILENCE_TIMEOUT" }); } catch {}
+        },
+        onMisfire: () => { appendLog("VAD: misfire (too short)"); },
+        onError: (err: unknown) => { appendLog(`VAD error: ${err instanceof Error ? err.message : String(err)}`); },
+      });
+      // Start the stream pipeline (discard output) and keep it cancellable
+      void audioStream
+        .pipeThrough(vadTransform)
+        .pipeTo(new WritableStream<Float32Array>({ write() {} }), { signal: aborter.signal })
+        .catch(() => { /* aborted or errored */ });
+    },
+    pause: () => {
+      const a = vadAbortRef.current;
+      if (a) {
+        try { a.abort(); } catch {}
+        vadAbortRef.current = null;
       }
     },
-    onSpeechEnd: () => {
-      appendLog("VAD: speech ended (onSpeechEnd)");
-      if (sendRef.current) {
-        sendRef.current({ type: "VAD_SILENCE_TIMEOUT" });
-      } else {
-        appendLog("VAD: sendRef null; dropping VAD_SILENCE_TIMEOUT");
-      }
-    },
-    onVADMisfire: () => { appendLog("VAD: misfire (too short)"); },
-    onSpeechRealStart: () => { appendLog("VAD: confirmed speech (onSpeechRealStart)"); },
-  });
-
-  // Diagnostics for vad-react state
-  useEffect(() => {
-    appendLog(`VAD loading=${vad.loading} listening=${vad.listening} userSpeaking=${vad.userSpeaking} errored=${vad.errored || false}`);
-  }, [appendLog, vad.loading, vad.listening, vad.userSpeaking, vad.errored]);
+  }), [appendLog]);
 
   const startRecording = useCallback(async () => {
     const currentState = mediaRecorderRef.current?.state;
     if (!canRecord || currentState === "recording" || currentState === "paused") return;
     try {
       appendLog(`Requesting microphone access… (recState=${currentState ?? "none"}, isRecording=${isRecording})`);
-      // Always reuse the same stream instance managed by vad.getStream
-      try { vad.start(); } catch {}
+      // Ensure VAD is running and reuse the same stream instance
+      try { await vad.start(); } catch {}
       const stream = sharedStreamRef.current ?? await navigator.mediaDevices.getUserMedia({ audio: true });
       if (!sharedStreamRef.current) sharedStreamRef.current = stream;
       // Try explicit mimeType for broader compatibility

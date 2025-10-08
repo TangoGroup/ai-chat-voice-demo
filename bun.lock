@@ -12,6 +12,8 @@
         "@radix-ui/react-tooltip": "^1.2.8",
         "@react-three/fiber": "^9",
         "@ricky0123/vad-react": "^0.0.34",
+        "@steelbrain/media-ingest-audio": "^1.0.0",
+        "@steelbrain/media-speech-detection-web": "^1.0.0",
         "@xstate/react": "^5.0.0",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
@@ -263,6 +265,10 @@
     "@rtsao/scc": ["@rtsao/scc@1.1.0", "", {}, "sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g=="],
 
     "@rushstack/eslint-patch": ["@rushstack/eslint-patch@1.13.0", "", {}, "sha512-2ih5qGw5SZJ+2fLZxP6Lr6Na2NTIgPRL/7Kmyuw0uIyBQnuhQ8fi8fzUTd38eIQmqp+GYLC00cI6WgtqHxBwmw=="],
+
+    "@steelbrain/media-ingest-audio": ["@steelbrain/media-ingest-audio@1.2.0", "", {}, "sha512-rBokkVJjayJkCEHAe1pw0BpFob8Lx3oLziTrgP79JYttKAL4lrXvKVs4MYSPKWWro35140Db3PW1a1wlt+1xWQ=="],
+
+    "@steelbrain/media-speech-detection-web": ["@steelbrain/media-speech-detection-web@1.2.0", "", { "dependencies": { "onnxruntime-web": "^1.22.0" } }, "sha512-Zl2qOvF94eiUy7aYgH78gCrwzYYNF4+UguV6bHUYC+CGuF+W+dmqKyh9ePXohl+Tc+PSqANndC7lFm/zdc+eeg=="],
 
     "@swc/helpers": ["@swc/helpers@0.5.15", "", { "dependencies": { "tslib": "^2.8.0" } }, "sha512-JQ5TuMi45Owi4/BIMAJBoSQoOJu12oOk/gADqlcUL9JEdHB8vyjUSsxqeNXnmXHjYKMi2WcYtezGEEhqUI/E2g=="],
 

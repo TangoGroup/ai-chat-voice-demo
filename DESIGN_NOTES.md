@@ -21,18 +21,19 @@ Develop a voice chat POC using custom AI API endpoints, ElevenLabs (11L), and a 
 
 ### VAD Implementation Decision
 
-- Refactored from a hand-rolled RMS threshold VAD to `@ricky0123/vad-react` hook, backed by `@ricky0123/vad-web` (ONNX runtime in the browser). Rationale:
-  - Better accuracy and robustness than simple RMS heuristics.
-  - Maintained, configurable, and provides reliable callbacks: `onSpeechStart`, `onSpeechEnd`, `onVADMisfire`, `onSpeechRealStart`.
-  - Exposes `getStream` to share a single `MediaStream` between VAD and `MediaRecorder`.
-- Integration:
-  - `src/app/page.tsx` initializes `useMicVAD({ model: "v5", startOnLoad: false, userSpeakingThreshold: 0.5, getStream })`.
-  - `onSpeechStart` → dispatch `VAD_SPEECH_START` to the voice machine (starts capture).
-  - `onSpeechEnd` → dispatch `VAD_SILENCE_TIMEOUT` (stops capture and triggers processing).
-  - The same mic stream is reused for recording to avoid duplicate prompts and permission churn.
-- Operational changes:
-  - Removed custom Analyzer/RAF loop and thresholds.
-  - `onStartListening` now calls `vad.start()`; `onStopAll` calls `vad.pause()` and releases the shared stream.
+- Switched from `@ricky0123/vad-react` to `@steelbrain/media-speech-detection-web` + `@steelbrain/media-ingest-audio`.
+- Rationale:
+  - Lighter integration without AudioWorklet/WASM asset hosting; fewer COI pitfalls.
+  - Web Streams API fits our pipeline model; simple, explicit start/stop via AbortController.
+  - Tunable timing params (`minSpeechDurationMs`, `redemptionDurationMs`, `threshold`) match our state machine semantics.
+- Integration (`src/app/page.tsx`):
+  - Build mic stream once and keep in `sharedStreamRef`.
+  - On listen: `ingestAudioStream(stream)` → `speechFilter({...callbacks})` → `WritableStream` (discard data, rely on callbacks).
+  - Map callbacks: `onSpeechStart` → dispatch `VAD_SPEECH_START`; `onSpeechEnd` → dispatch `VAD_SILENCE_TIMEOUT`; `onMisfire` logs only.
+  - Control: `vad.start()` creates the pipeline and stores an `AbortController`; `vad.pause()` aborts and clears it.
+  - Recording reuses the same `sharedStreamRef` to avoid multiple mic prompts.
+  - Mute button pauses VAD and stops any active recording; unmute restarts VAD only when not in `ready`/`error`.
+  - Preload: on mount, call `preloadModel()` from `@steelbrain/media-speech-detection-web` to download/init the ONNX model and reduce first-interaction latency.
 
 ### Cross-Origin Isolation (COI) for WebAssembly/AudioWorklet (2025-10-07)
 
