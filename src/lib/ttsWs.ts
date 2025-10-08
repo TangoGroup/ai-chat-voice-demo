@@ -228,6 +228,9 @@ export class TtsWsPlayer {
               void this.connect();
             } catch {}
           }
+          // If we did produce audio, ensure consumers are notified playback is done.
+          // In some environments, MSE 'ended' may not fire reliably on close.
+          try { if (this.firstAudioResolved) this.opts.onPlaybackEnded?.(); } catch {}
         };
       } catch (err) {
         reject(err);
