@@ -217,7 +217,8 @@ export default function Home() {
           try { if (sendRef.current) sendRef.current({ type: "TTS_STARTED" }); } catch {}
         },
         onFinal: () => {
-          // Player handles its own teardown
+          // Notify machine that TTS finished (WS side). It will decide when to return to listening.
+          try { if (sendRef.current) sendRef.current({ type: "TTS_ENDED" }); } catch {}
         },
         // Start with defaults; we can expose tuning later
       });

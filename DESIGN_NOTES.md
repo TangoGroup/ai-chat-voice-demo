@@ -108,6 +108,16 @@ Develop a voice chat POC using custom AI API endpoints, ElevenLabs (11L), and a 
   - Cleanup TTS analyser graph and animation frame.
   - This ensures prior speech cannot overlap with new speech.
 
+### Streaming Completion Semantics (2025-10-08)
+
+- Requirement: control returns to `listening_idle` after both AI SSE has finished AND TTS WS playback has ended — whichever completes later.
+- Implementation:
+  - Added context flags in `voiceMachine`: `isStreaming`, `streamSseDone`, `streamTtsDone`.
+  - `page.tsx` dispatches `TTS_STARTED` on first audio and `TTS_ENDED` on WS `onFinal`.
+  - When `processActor` (SSE) completes, if TTS already ended, transition to `listening_idle`; else transition to `speaking_streaming` and wait for `TTS_ENDED`.
+  - Guards `isStreaming` and `isStreamingAndTtsDone` coordinate transitions.
+  - `clearStreaming` resets flags on completion or interrupts.
+
 ## State Machine (XState v5)
 
 ### Regions

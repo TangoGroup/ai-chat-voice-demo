@@ -9,6 +9,10 @@ export interface VoiceContext {
   audioBuffer: ArrayBuffer | null;
   error: string | null;
   recordingBlob: Blob | null;
+  // Streaming (WS TTS + SSE) coordination flags
+  isStreaming: boolean;
+  streamSseDone: boolean;
+  streamTtsDone: boolean;
 }
 
 export type VoiceEvents =
@@ -21,7 +25,8 @@ export type VoiceEvents =
   | { type: "ERROR"; message: string }
   | { type: "VAD_TURN_ON" }
   | { type: "VAD_TURN_OFF" }
-  | { type: "TTS_STARTED" };
+  | { type: "TTS_STARTED" }
+  | { type: "TTS_ENDED" };
 
 export interface ProcessInput {
   blob: Blob;
@@ -104,6 +109,12 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       clearAudioBuffer: assign(() => ({ audioBuffer: null } as Partial<VoiceContext>)),
       clearError: assign(() => ({ error: null } as Partial<VoiceContext>)),
 
+      // Streaming coordination
+      markStreamingOn: assign(() => ({ isStreaming: true } as Partial<VoiceContext>)),
+      markSseDone: assign(() => ({ streamSseDone: true } as Partial<VoiceContext>)),
+      markTtsDone: assign(() => ({ streamTtsDone: true } as Partial<VoiceContext>)),
+      clearStreaming: assign(() => ({ isStreaming: false, streamSseDone: false, streamTtsDone: false } as Partial<VoiceContext>)),
+
       // Logging
       logVadOn: () => d.log("VAD ON"),
       logVadOff: () => d.log("VAD OFF"),
@@ -115,6 +126,12 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
         const buf = evt.output?.audioBuffer;
         return buf instanceof ArrayBuffer && buf.byteLength > 0;
       },
+      isStreaming: ({ context }) => {
+        return context.isStreaming === true && (!context.streamSseDone || !context.streamTtsDone);
+      },
+      isStreamingAndTtsDone: ({ context }) => {
+        return context.isStreaming === true && context.streamTtsDone === true;
+      },
     },
   }).createMachine({
     id: "voice",
@@ -125,6 +142,9 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       audioBuffer: null,
       error: null,
       recordingBlob: null,
+      isStreaming: false,
+      streamSseDone: false,
+      streamTtsDone: false,
     },
     states: {
       control: {
@@ -182,19 +202,32 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
               // Interrupt: immediately return to listening (keep VAD on)
               STOP_ALL: { target: "listening_idle", actions: ["stopPlayback", "startListeningInfra"] },
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture"] },
-              TTS_STARTED: { actions: "vizSpeaking" },
+              TTS_STARTED: { actions: ["vizSpeaking", "markStreamingOn"] },
+              TTS_ENDED: { actions: "markTtsDone" },
             },
             invoke: {
               src: "processActor",
               input: ({ context }) => ({ blob: context.recordingBlob! }),
               onDone: [
                 { guard: "hasAudioBuffer", target: "playing", actions: "storeProcessOutput" },
+                // Streaming path: SSE finished. If TTS already ended, go back to listening; otherwise wait.
+                { guard: "isStreamingAndTtsDone", target: "listening_idle", actions: ["storeProcessOutput", "markSseDone", "clearStreaming"] },
+                { guard: "isStreaming", target: "speaking_streaming", actions: ["storeProcessOutput", "markSseDone"] },
                 { target: "listening_idle", actions: "storeProcessOutput" },
               ],
               onError: {
                 target: "error",
                 actions: "storeErrorFromEvent",
               },
+            },
+          },
+          speaking_streaming: {
+            entry: ["vizSpeaking"],
+            on: {
+              // Interrupt: immediately return to listening (keep VAD on)
+              STOP_ALL: { target: "listening_idle", actions: ["stopPlayback", "startListeningInfra", "clearStreaming"] },
+              VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture", "clearStreaming"] },
+              TTS_ENDED: { target: "listening_idle", actions: "clearStreaming" },
             },
           },
           playing: {

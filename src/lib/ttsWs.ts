@@ -27,6 +27,7 @@ export class TtsWsPlayer {
   // MSE playback
   private mediaSource: MediaSource | null = null;
   private sourceBuffer: SourceBuffer | null = null;
+  private chosenSourceBufferMime: string | null = null;
   private pendingChunks: ArrayBuffer[] = [];
   private isBufferUpdating = false;
   private audioEl: HTMLAudioElement;
@@ -38,6 +39,11 @@ export class TtsWsPlayer {
   private rafId: number | null = null;
   private firstAudioResolved = false;
   private desiredMuted = false;
+  private autoplayClickHandlerAdded = false;
+  private useBlobFallback = false;
+  private fallbackChunks: ArrayBuffer[] = [];
+  private preferMp4 = true;
+  private retryStage = 0; // 0=try MP4, 1=try MP3, 2=Blob fallback
 
   constructor(private readonly opts: TtsWsPlayerOptions) {
     this.audioEl = new Audio();
@@ -46,7 +52,11 @@ export class TtsWsPlayer {
 
   async connect(): Promise<void> {
     const { voiceId, modelId, onLog } = this.opts;
-    const url = `wss://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream-input?model_id=${encodeURIComponent(modelId)}`;
+    const baseUrl = `wss://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream-input`;
+    const queryParams: Record<string, string> = {
+      model_id: modelId,
+    };
+    const url = `${baseUrl}?${new URLSearchParams(queryParams).toString()}`;
     // Reset prior session state
     this.endOfStream();
     this.teardownMedia("pre-connect");
@@ -57,18 +67,35 @@ export class TtsWsPlayer {
     this.mediaSource = null;
     this.objectUrl = null;
     this.firstAudioResolved = false;
+    this.useBlobFallback = false;
+    this.fallbackChunks = [];
+    this.chosenSourceBufferMime = null;
 
-    // Prepare MediaSource for MP3
-    if (!("MediaSource" in window) || !(window as unknown as { MediaSource?: typeof MediaSource }).MediaSource) {
-      throw new Error("MediaSource not supported in this browser");
+    // Prepare MediaSource for MP4/AAC if supported; else MP3; else Blob fallback
+    if (this.retryStage === 2) {
+      this.useBlobFallback = true;
+      if (onLog) onLog("TTS WS: Forcing Blob fallback due to prior failures");
+    } else if (!("MediaSource" in window) || !(window as unknown as { MediaSource?: typeof MediaSource }).MediaSource) {
+      this.useBlobFallback = true;
+      if (onLog) onLog("TTS WS: MediaSource not supported; using Blob fallback");
+    } else {
+      const MS = (window as unknown as { MediaSource: typeof MediaSource }).MediaSource;
+      const canMp4 = typeof MS.isTypeSupported === "function" && MS.isTypeSupported("audio/mp4; codecs=\"mp4a.40.2\"");
+      const canMp3 = typeof MS.isTypeSupported === "function" && MS.isTypeSupported("audio/mpeg");
+      // Stage 0 prefers MP4 when available; Stage 1 forces MP3 if available
+      const useMp4 = (this.retryStage === 0) && canMp4;
+      const useMp3 = (this.retryStage <= 1) && !useMp4 && canMp3;
+      if (useMp4 || useMp3) {
+        this.mediaSource = new MS();
+        this.objectUrl = URL.createObjectURL(this.mediaSource);
+        this.audioEl.src = this.objectUrl;
+        this.chosenSourceBufferMime = useMp4 ? "audio/mp4; codecs=\"mp4a.40.2\"" : (useMp3 ? "audio/mpeg" : null);
+      } else {
+        this.useBlobFallback = true;
+        if (onLog) onLog("TTS WS: Neither MP4/AAC nor MP3 MSE types supported; using Blob fallback");
+      }
     }
-    const MS = (window as unknown as { MediaSource: typeof MediaSource }).MediaSource;
-    if (typeof MS.isTypeSupported === "function" && !MS.isTypeSupported("audio/mpeg")) {
-      throw new Error("MediaSource does not support audio/mpeg SourceBuffer in this browser");
-    }
-    this.mediaSource = new MS();
-    this.objectUrl = URL.createObjectURL(this.mediaSource);
-    this.audioEl.src = this.objectUrl;
+    if (onLog) onLog(`TTS WS: audioEl.src set to ${this.audioEl.currentSrc || this.audioEl.src || "(empty)"}`);
     // Ensure element is configured for autoplay policies and available to the audio stack
     try {
       this.audioEl.controls = false;
@@ -82,23 +109,27 @@ export class TtsWsPlayer {
       this.audioEl.muted = true;
       void this.audioEl.play().catch(() => { /* muted autoplay should succeed */ });
     } catch {}
-    const sourceOpenPromise = new Promise<void>((resolve, reject) => {
-      this.mediaSource!.addEventListener("sourceopen", () => {
-        try {
-          if (!this.mediaSource) return reject(new Error("MediaSource missing on sourceopen"));
-          this.sourceBuffer = this.mediaSource.addSourceBuffer("audio/mpeg");
-          this.sourceBuffer.mode = "sequence";
-          this.sourceBuffer.addEventListener("updateend", () => {
-            this.isBufferUpdating = false;
-            this.drainQueue();
-          });
-          resolve();
-        } catch (e) {
-          if (onLog) onLog(`TTS WS: failed to add SourceBuffer (audio/mpeg): ${(e as Error).message}`);
-          reject(e);
-        }
-      }, { once: true });
-    });
+    const sourceOpenPromise = this.useBlobFallback
+      ? Promise.resolve()
+      : new Promise<void>((resolve, reject) => {
+        this.mediaSource!.addEventListener("sourceopen", () => {
+          try {
+            if (!this.mediaSource) return reject(new Error("MediaSource missing on sourceopen"));
+            const mime = this.chosenSourceBufferMime ?? "audio/mp4; codecs=\"mp4a.40.2\"";
+            this.sourceBuffer = this.mediaSource.addSourceBuffer(mime);
+            if (onLog) onLog(`TTS WS: added SourceBuffer with mime=${mime}`);
+            this.sourceBuffer.mode = "sequence";
+            this.sourceBuffer.addEventListener("updateend", () => {
+              this.isBufferUpdating = false;
+              this.drainQueue();
+            });
+            resolve();
+          } catch (e) {
+            if (onLog) onLog(`TTS WS: failed to add SourceBuffer (${(this.chosenSourceBufferMime ?? "unknown")}): ${(e as Error).message}`);
+            reject(e);
+          }
+        }, { once: true });
+      });
 
     const wsOpenPromise = new Promise<void>((resolve, reject) => {
       try {
@@ -118,9 +149,12 @@ export class TtsWsPlayer {
                 speed: this.opts.speed ?? 1.0,
               },
             };
+            const outputFormat = this.retryStage === 0 ? "mp4_44100_128" : "mp3_44100_128";
+            const generationConfig: Record<string, unknown> = { output_format: outputFormat };
             if (this.opts.chunkLengthSchedule && this.opts.chunkLengthSchedule.length > 0) {
-              initMsg.generation_config = { chunk_length_schedule: this.opts.chunkLengthSchedule };
+              generationConfig.chunk_length_schedule = this.opts.chunkLengthSchedule;
             }
+            initMsg.generation_config = generationConfig;
             const payload = JSON.stringify(initMsg);
             if (onLog) onLog(`TTS WS -> init (${payload.length} bytes)`);
             ws.send(payload);
@@ -135,14 +169,20 @@ export class TtsWsPlayer {
             const payload = JSON.parse(ev.data) as { audio?: string; isFinal?: boolean; alignment?: unknown };
             if (payload.audio) {
               const bytes = base64ToArrayBuffer(payload.audio);
-              this.enqueue(bytes);
+              if (this.useBlobFallback) {
+                this.fallbackChunks.push(bytes);
+              } else {
+                this.enqueue(bytes);
+              }
               if (!this.firstAudioResolved) {
                 this.firstAudioResolved = true;
                 // Initialize analyser for HUD volume
                 try { this.ensureAnalyserForAudioEl(); } catch {}
                 // Unmute now that audio has started; element is already playing muted
                 try { this.audioEl.muted = this.desiredMuted; } catch {}
-                if (onLog) onLog("TTS WS: first audio chunk received; playback started (MSE)");
+                // Retry play in case autoplay was blocked
+                this.ensurePlaybackStarted();
+                if (onLog) onLog(`TTS WS: first audio chunk received; playback starting (${this.useBlobFallback ? "Blob" : "MSE"})`);
                 try { this.opts.onFirstAudio?.(); } catch {}
               }
               // suppress per-chunk logs for noise reduction
@@ -150,6 +190,18 @@ export class TtsWsPlayer {
             if (payload.isFinal) {
               if (onLog) onLog("TTS WS: final message received");
               this.endOfStream();
+              if (this.useBlobFallback && this.fallbackChunks.length > 0) {
+                const mime = (this.chosenSourceBufferMime && this.chosenSourceBufferMime.startsWith("audio/mp4")) ? "audio/mp4" : "audio/mpeg";
+                try {
+                  const blob = new Blob(this.fallbackChunks.map((b) => new Uint8Array(b)), { type: mime });
+                  const url = URL.createObjectURL(blob);
+                  this.audioEl.src = url;
+                  if (onLog) onLog(`TTS WS: Blob fallback URL set (${mime}) -> ${this.audioEl.currentSrc || this.audioEl.src}`);
+                  this.ensurePlaybackStarted();
+                } catch (e) {
+                  if (onLog) onLog(`TTS WS: Blob fallback failed: ${(e as Error).message}`);
+                }
+              }
               try { this.opts.onFinal?.(); } catch {}
             }
           } catch (e) {
@@ -162,6 +214,14 @@ export class TtsWsPlayer {
         ws.onclose = (ev) => {
           if (onLog) onLog(`TTS WS closed (code=${ev.code} reason="${ev.reason}")`);
           this.endOfStream();
+          // Early close before any audio: progress fallback stages
+          if (!this.firstAudioResolved && this.retryStage < 2) {
+            try {
+              this.retryStage += 1;
+              if (onLog) onLog(`TTS WS: retrying with stage=${this.retryStage === 1 ? "MP3" : "Blob"}`);
+              void this.connect();
+            } catch {}
+          }
         };
       } catch (err) {
         reject(err);
@@ -213,6 +273,43 @@ export class TtsWsPlayer {
     } catch {
       this.isBufferUpdating = false;
     }
+  }
+
+  private ensurePlaybackStarted() {
+    const { onLog } = this.opts;
+    try {
+      const p = this.audioEl.play();
+      if (p && typeof p.then === "function") {
+        p.then(() => {
+          if (onLog) onLog("TTS WS: audioEl.play() succeeded");
+          this.removeAutoplayClickHandler();
+        }).catch(() => {
+          if (onLog) onLog("TTS WS: audioEl.play() blocked; awaiting user gesture");
+          this.addAutoplayClickHandler();
+        });
+      }
+    } catch {
+      this.addAutoplayClickHandler();
+    }
+  }
+
+  private addAutoplayClickHandler() {
+    if (this.autoplayClickHandlerAdded) return;
+    const { onLog } = this.opts;
+    const onFirstClick = () => {
+      try { document.removeEventListener("click", onFirstClick, true); } catch {}
+      this.autoplayClickHandlerAdded = false;
+      try { void this.audioEl.play(); } catch {}
+      if (onLog) onLog("TTS WS: retried audioEl.play() after user gesture");
+    };
+    document.addEventListener("click", onFirstClick, true);
+    this.autoplayClickHandlerAdded = true;
+    if (onLog) onLog("TTS WS: installed one-time click handler for autoplay resume");
+  }
+
+  private removeAutoplayClickHandler() {
+    if (!this.autoplayClickHandlerAdded) return;
+    // Handler removes itself on first click; flag reset handled there
   }
 
   private ensureAnalyserForAudioEl(): void {
@@ -295,6 +392,7 @@ export class TtsWsPlayer {
         try { this.sourceBuffer.abort(); } catch {}
       }
       this.sourceBuffer = null;
+      this.chosenSourceBufferMime = null;
       this.pendingChunks = [];
       this.isBufferUpdating = false;
       if (this.mediaSource) {
@@ -309,6 +407,8 @@ export class TtsWsPlayer {
       try { this.audioEl.pause(); } catch {}
       this.audioEl.removeAttribute("src");
       try { this.audioEl.load(); } catch {}
+      this.useBlobFallback = false;
+      this.fallbackChunks = [];
     } catch {
       // ignore
     }
