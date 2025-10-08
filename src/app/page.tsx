@@ -349,7 +349,7 @@ export default function Home() {
       const aborter = new AbortController();
       vadAbortRef.current = aborter;
       const vadTransform = speechFilter({
-        threshold: 0.5,
+        threshold: 0.3,
         minSpeechDurationMs: 400,
         redemptionDurationMs: 1400,
         lookBackDurationMs: 384,
