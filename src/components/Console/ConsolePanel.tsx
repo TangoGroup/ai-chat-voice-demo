@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef, useEffect } from "react";
+import { forwardRef, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -17,10 +17,19 @@ export interface ConsolePanelProps {
    */
   hideOverlay?: boolean;
   hud?: { state: string; mic: number; tts: number; eff: number } | null;
+  /**
+   * Optional callback to manually trigger TTS with entered text.
+   */
+  onSpeak?: (text: string) => void;
+  /**
+   * Enable user speech to interrupt AI speaking/processing.
+   */
+  interactiveEnabled?: boolean;
+  onToggleInteractive?: (enabled: boolean) => void;
 }
 
 const ConsolePanel = forwardRef<HTMLDivElement, ConsolePanelProps>(function ConsolePanel(
-  { title = "Voice Chat Console", logs, canRecord, isRecording, onClear, textareaRef, hideOverlay = true, hud = null },
+  { title = "Voice Chat Console", logs, canRecord, isRecording, onClear, textareaRef, hideOverlay = true, hud = null, onSpeak, interactiveEnabled = false, onToggleInteractive },
   _ref
 ) {
   useEffect(() => {
@@ -28,6 +37,10 @@ const ConsolePanel = forwardRef<HTMLDivElement, ConsolePanelProps>(function Cons
       textareaRef.current.scrollTop = textareaRef.current.scrollHeight;
     }
   }, [logs.length, textareaRef]);
+
+  const [manualText, setManualText] = useState<string>("");
+
+  const canSpeak = typeof onSpeak === "function" && manualText.trim().length > 0;
 
   return (
     <div className="fixed bottom-4 right-4 z-50" ref={_ref}>
@@ -48,6 +61,53 @@ const ConsolePanel = forwardRef<HTMLDivElement, ConsolePanelProps>(function Cons
               Clear
             </Button>
           </div>
+          {/* Interrupt toggle */}
+          <div className="px-4 pb-2">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={!!interactiveEnabled}
+                onChange={(e) => onToggleInteractive?.(e.target.checked)}
+                aria-label="Interactive conversation"
+              />
+              <span>Interactive conversation</span>
+            </label>
+            <div className="text-[11px] text-muted-foreground mt-1">Allow interrupting while AI is speaking</div>
+          </div>
+          {/* Manual TTS input */}
+          {onSpeak && (
+            <div className="px-4 pb-2">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  aria-label="Text to speak"
+                  placeholder="Type text to speak…"
+                  value={manualText}
+                  onChange={(e) => setManualText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && canSpeak) {
+                      onSpeak(manualText.trim());
+                      setManualText("");
+                    }
+                  }}
+                  className="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:bg-input/30 flex h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <Button
+                  type="button"
+                  onClick={() => {
+                    if (!canSpeak) return;
+                    onSpeak(manualText.trim());
+                    setManualText("");
+                  }}
+                  disabled={!canSpeak}
+                  className="shrink-0"
+                >
+                  Speak
+                </Button>
+              </div>
+            </div>
+          )}
           {hud && (
             <div className="px-4 pb-2">
               <div className="mb-2 flex items-center justify-between text-xs">

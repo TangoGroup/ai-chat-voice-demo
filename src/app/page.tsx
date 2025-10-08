@@ -10,7 +10,9 @@ import { useTheme } from "@/components/Theme/ThemeProvider";
 import { createStopwatch, formatMs, getStoredChatId, setChatId, clearChatId } from "@/lib/utils";
 import { TtsWsPlayer } from "@/lib/ttsWs";
 import { streamSSE } from "@/lib/sse";
+import { useChat } from "@/lib/chat";
 import { GlassButton } from "@/components/ui/glass-button";
+import { useQueryClient } from "@tanstack/react-query";
 import { type VoiceVisualState } from "@/machines/voiceMachine";
 import { useVoiceService } from "@/machines/useVoiceService";
 import ConsolePanel from "@/components/Console/ConsolePanel";
@@ -19,17 +21,27 @@ export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [isMicMuted, setIsMicMuted] = useState<boolean>(false);
+  const [interactiveEnabled, setInteractiveEnabled] = useState<boolean>(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const consoleRef = useRef<HTMLTextAreaElement | null>(null);
   const [canRecord, setCanRecord] = useState<boolean>(false);
   const { theme, toggle } = useTheme();
   const chatIdRef = useRef<string | null>(null);
+  const queryClient = useQueryClient();
+  // Chat history via React Query + localStorage (client-side context)
+  const { messages, sendMessage, setMessages } = useChat(chatIdRef.current ?? "default", undefined);
   const [hud, setHud] = useState<{ state: string; mic: number; tts: number; eff: number } | null>(null);
 
   // Shared mic stream and machine sender
   const sharedStreamRef = useRef<MediaStream | null>(null);
   const sendRef = useRef<((event: { type: string; [k: string]: unknown }) => void) | null>(null);
+  // VAD runtime flags
+  const vadEnabledRef = useRef<boolean>(false);
+  const vadPipelineStartedRef = useRef<boolean>(false);
+  // Interrupt policy and state refs for VAD gating
+  const interactiveEnabledRef = useRef<boolean>(false);
+  const isRecordingRef = useRef<boolean>(false);
 
   useEffect(() => {
     setCanRecord(typeof window !== "undefined" && "MediaRecorder" in window);
@@ -122,12 +134,12 @@ export default function Home() {
         try { currentAudioRef.current.pause(); } catch {}
         currentAudioRef.current = null;
       }
+      ttsSpeakingRef.current = false;
       // Interrupt any ongoing AI/TTS streaming
       try { ttsAbortRef.current?.abort(); } catch {}
       ttsAbortRef.current = null;
       try { ttsPlayerRef.current?.close(); } catch {}
       ttsPlayerRef.current = null;
-      releaseSharedStream();
       // TTS WebAudio is managed inside TtsWsPlayer; nothing to clean here beyond closing player
     },
     startCapture: () => { void startRecording(); },
@@ -137,6 +149,7 @@ export default function Home() {
         try { currentAudioRef.current.pause(); } catch {}
         currentAudioRef.current = null;
       }
+      ttsSpeakingRef.current = false;
       // Also stop streaming TTS and upstream SSE to avoid overlap
       try { ttsAbortRef.current?.abort(); } catch {}
       ttsAbortRef.current = null;
@@ -169,29 +182,9 @@ export default function Home() {
       const modelId = process.env.NEXT_PUBLIC_ELEVENLABS_MODEL_ID || process.env.ELEVENLABS_MODEL_ID || "eleven_flash_v2_5";
       const voiceId = process.env.NEXT_PUBLIC_ELEVENLABS_VOICE_ID || process.env.ELEVENLABS_VOICE_ID || "";
       if (!apiKey || !voiceId) {
-        appendLog("Missing ElevenLabs API key or Voice ID for WS; falling back to REST TTS (deprecated)");
-        const aiResp = await fetch("/api/generateAnswerStream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: transcribedText, stream: false, chatId: chatIdRef.current || undefined }) });
-        const aiNetworkMs = sw.splitMs();
-        appendLog(`AI response status: ${aiResp.status} (network: ${formatMs(aiNetworkMs)}) chatId=${chatIdRef.current ?? "none"}`);
-        type AIResponse = {
-          chat_id?: string;
-          chatId?: string;
-          answer?: string;
-          text?: string;
-          message?: string;
-        };
-        const aiData = (await aiResp.json()) as AIResponse;
-        const aiParseMs = sw.splitMs();
-        appendLog(`AI parsed (${formatMs(aiParseMs)})`);
-        const answerText = (aiData.answer || aiData.text || aiData.message || JSON.stringify(aiData)) as string;
-        appendLog("Calling ElevenLabs TTS (REST)…");
-        const ttsResp = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: answerText }) });
-        const ttsNetworkMs = sw.splitMs();
-        appendLog(`TTS response status: ${ttsResp.status} (network: ${formatMs(ttsNetworkMs)})`);
-        const audioBuffer = await ttsResp.arrayBuffer();
-        const ttsDecodeMs = sw.splitMs();
-        appendLog(`TTS audio buffered (${formatMs(ttsDecodeMs)})`);
-        return { transcribedText, answerText, audioBuffer };
+        const msg = "Missing ElevenLabs API key or Voice ID for WS";
+        appendLog(msg);
+        throw new Error(msg);
       }
 
       // Clean up any previous streaming session before starting a new one
@@ -214,10 +207,12 @@ export default function Home() {
         },
         onFirstAudio: () => {
           // Notify state machine; it will drive the visualizer deterministically
+          ttsSpeakingRef.current = true;
           try { if (sendRef.current) sendRef.current({ type: "TTS_STARTED" }); } catch {}
         },
         onFinal: () => {
           // Notify machine that TTS finished (WS side). It will decide when to return to listening.
+          ttsSpeakingRef.current = false;
           try { if (sendRef.current) sendRef.current({ type: "TTS_ENDED" }); } catch {}
         },
         // Start with defaults; we can expose tuning later
@@ -227,43 +222,9 @@ export default function Home() {
       try {
         await player.connect();
       } catch (e) {
-        appendLog(`TTS WS connect failed: ${(e as Error).message}. Falling back to REST TTS.`);
-        const aiResp = await fetch("/api/generateAnswerStream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query: transcribedText,
-            stream: false,
-            ...(chatIdRef.current ? { chatId: chatIdRef.current } : {}),
-          }),
-        });
-        const aiNetworkMs = sw.splitMs();
-        appendLog(`AI response status: ${aiResp.status} (network: ${formatMs(aiNetworkMs)})`);
-        type AIResponse = {
-          chat_id?: string;
-          chatId?: string;
-          answer?: string;
-          text?: string;
-          message?: string;
-        };
-        const aiData = (await aiResp.json()) as AIResponse;
-        const aiParseMs = sw.splitMs();
-        appendLog(`AI parsed (${formatMs(aiParseMs)})`);
-        const respChatId = aiData.chat_id ?? aiData.chatId;
-        if (typeof respChatId === "string" && respChatId) {
-          chatIdRef.current = respChatId;
-          setChatId(respChatId);
-          appendLog(`Captured chat_id from REST: ${respChatId}`);
-        }
-        const answerText = (aiData.answer || aiData.text || aiData.message || JSON.stringify(aiData)) as string;
-        appendLog("Calling ElevenLabs TTS (REST)…");
-        const ttsResp = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: answerText }) });
-        const ttsNetworkMs = sw.splitMs();
-        appendLog(`TTS response status: ${ttsResp.status} (network: ${formatMs(ttsNetworkMs)})`);
-        const audioBuffer = await ttsResp.arrayBuffer();
-        const ttsDecodeMs = sw.splitMs();
-        appendLog(`TTS audio buffered (${formatMs(ttsDecodeMs)})`);
-        return { transcribedText, answerText, audioBuffer };
+        const errMsg = `TTS WS connect failed: ${(e as Error).message}`;
+        appendLog(errMsg);
+        throw e;
       }
       const wsStartMs = sw.splitMs();
       appendLog(`TTS WS connected (${formatMs(wsStartMs)})`);
@@ -272,10 +233,24 @@ export default function Home() {
       ttsAbortRef.current = aborter;
       ttsPlayerRef.current = player;
       let assembledText = "";
-      await streamSSE("/api/generateAnswerStream", {
+      // Seed chat with user + placeholder assistant locally (no extra network)
+      const seedBase = messages.length === 0 ? [{ role: "system", content: "" } as const] : [];
+      let currentMsgs: any[] = [...seedBase, ...messages as any, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
+      try { setMessages(currentMsgs as any); } catch {}
+      // Debug: outbound SSE request summary
+      try { appendLog(`AI SSE request → messages=${currentMsgs.length - 1}`); } catch {}
+      await streamSSE("/api/generateAnswerStreamOpenRouter", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: transcribedText, stream: true, ...(chatIdRef.current ? { chatId: chatIdRef.current } : {}) }),
+        body: JSON.stringify({
+          stream: true,
+          ...(chatIdRef.current ? { chatId: chatIdRef.current } : {}),
+          messages: (() => {
+            const base = messages.length === 0 ? [{ role: "system", content: "" } as const] : [];
+            const withUser = [...base, ...messages as any, { role: "user", content: transcribedText }];
+            return withUser.slice(-24); // crude trim here; exact trim done server-side too
+          })(),
+        }),
         signal: aborter.signal,
       }, {
         onMessage: (data) => {
@@ -295,7 +270,12 @@ export default function Home() {
           if ((eventType === "start" || eventType === "session_start" || eventType === "metadata") && typeof upstreamChatId === "string" && upstreamChatId) {
             chatIdRef.current = upstreamChatId;
             setChatId(upstreamChatId);
-            appendLog(`Captured chat_id from SSE start: ${upstreamChatId}`);
+            appendLog(`SSE start: chat_id=${upstreamChatId}`);
+            return;
+          }
+          if (eventType === "error") {
+            const msg = (typeof data === "object" && data && "message" in (data as any)) ? (data as any).message : (obj?.message ?? "unknown");
+            appendLog(`SSE error event: ${String(msg)}`);
             return;
           }
           const token = typeof data === "string"
@@ -304,7 +284,23 @@ export default function Home() {
           if (typeof token === "string" && token.length > 0) {
             assembledText += token;
             const shouldFlush = /[\.!?\n]$/.test(token) || token.length >= 40;
+            // Debug: token preview and flush
+            try {
+              const preview = token.replace(/\n/g, "\\n").slice(0, 64);
+              appendLog(`SSE token len=${token.length} flush=${shouldFlush} preview="${preview}${token.length > 64 ? "…" : ""}"`);
+            } catch {}
             player.sendText(token, { flush: shouldFlush });
+            try { appendLog("TTS queued token"); } catch {}
+            // Update assistant message incrementally in chat cache
+            try {
+              const next = currentMsgs.slice();
+              const last = next[next.length - 1];
+              if (last && last.role === "assistant") {
+                next[next.length - 1] = { role: "assistant", content: (last.content || "") + token } as any;
+                currentMsgs = next;
+                setMessages(next as any);
+              }
+            } catch {}
           }
         },
         onError: (e) => { appendLog(`AI SSE error: ${String(e)} chatId=${chatIdRef.current ?? "none"}`); },
@@ -314,6 +310,7 @@ export default function Home() {
           appendLog(`AI SSE done; flushed TTS buffer chatId=${chatIdRef.current ?? "none"}`);
           if (assembledText.trim().length > 0) {
             appendLog(`AI final: "${assembledText}"`);
+            // Final state already in cache via incremental updates
           }
           // Mark SSE session as completed
           if (ttsAbortRef.current === aborter) ttsAbortRef.current = null;
@@ -328,6 +325,9 @@ export default function Home() {
   }), [appendLog, canRecord]));
   // Keep send in a ref to avoid re-render feedback loops inside raf callbacks
   useEffect(() => { sendRef.current = send as unknown as (e: { type: string }) => void; }, [send]);
+  // Track latest recording and interactive toggle for VAD gating
+  useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
+  useEffect(() => { interactiveEnabledRef.current = interactiveEnabled; }, [interactiveEnabled]);
 
   // Keep a ref to the current audio to allow interruption
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -335,51 +335,201 @@ export default function Home() {
   // TTS WS player and SSE abort controller for interruption
   const ttsPlayerRef = useRef<TtsWsPlayer | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);
+  // Speaking state inferred for gating interruptions
+  const ttsSpeakingRef = useRef<boolean>(false);
 
-  // Steelbrain VAD controller
+  // Manual input: send text to AI SSE and stream tokens into WS TTS (skip STT)
+  const manualSpeak = useCallback(async (text: string) => {
+    const transcribedText = (text || "").trim();
+    if (!transcribedText) return;
+    appendLog(`Manual input: "${transcribedText}"`);
+    const apiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY || "";
+    const modelId = process.env.NEXT_PUBLIC_ELEVENLABS_MODEL_ID || process.env.ELEVENLABS_MODEL_ID || "eleven_flash_v2_5";
+    const voiceId = process.env.NEXT_PUBLIC_ELEVENLABS_VOICE_ID || process.env.ELEVENLABS_VOICE_ID || "";
+    if (!apiKey || !voiceId) {
+      const msg = "Missing ElevenLabs API key or Voice ID for WS";
+      appendLog(msg);
+      return;
+    }
+
+    // Clean up any previous streaming session before starting a new one
+    try { ttsAbortRef.current?.abort(); } catch {}
+    ttsAbortRef.current = null;
+    try { ttsPlayerRef.current?.close(); } catch {}
+    ttsPlayerRef.current = null;
+
+    const player = new TtsWsPlayer({
+      apiKey,
+      voiceId,
+      modelId,
+      chunkLengthSchedule: [80, 120, 180, 240],
+      onLog: appendLog,
+      onVolume: (vol: number) => {
+        try {
+          type VoiceStateEventDetail = { state?: import("@/machines/voiceMachine").VoiceVisualState; ttsVolume?: number };
+          window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { ttsVolume: vol } }));
+        } catch {}
+      },
+      onFirstAudio: () => { ttsSpeakingRef.current = true; try { sendRef.current?.({ type: "TTS_STARTED" }); } catch {} },
+      onFinal: () => { ttsSpeakingRef.current = false; try { sendRef.current?.({ type: "TTS_ENDED" }); } catch {} },
+    });
+
+    try {
+      await player.connect();
+    } catch (e) {
+      const errMsg = `TTS WS connect failed: ${(e as Error).message}`;
+      appendLog(errMsg);
+      return;
+    }
+    appendLog("Manual SSE: TTS WS connected");
+
+    const aborter = new AbortController();
+    ttsAbortRef.current = aborter;
+    ttsPlayerRef.current = player;
+    let assembledText = "";
+
+    // Seed chat: add user message and placeholder assistant
+    const seedBase = messages.length === 0 ? [{ role: "system", content: "" } as const] : [];
+    let currentMsgs: ReadonlyArray<{ role: "system" | "user" | "assistant"; content: string }> = [...seedBase as any, ...messages as any, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
+    try { setMessages(currentMsgs as any); } catch {}
+
+    await streamSSE("/api/generateAnswerStreamOpenRouter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        stream: true,
+        ...(chatIdRef.current ? { chatId: chatIdRef.current } : {}),
+        messages: (() => {
+          const base = messages.length === 0 ? [{ role: "system", content: "" } as const] : [];
+          const withUser = [...base, ...messages as any, { role: "user", content: transcribedText }];
+          return withUser.slice(-24);
+        })(),
+      }),
+      signal: aborter.signal,
+    }, {
+      onMessage: (data) => {
+        type SSEMessage = {
+          event?: string;
+          type?: string;
+          chat_id?: string;
+          chatId?: string;
+          message?: string;
+          delta?: string;
+          text?: string;
+          answer?: string;
+        };
+        const obj: SSEMessage | null = (typeof data === "object" && data !== null) ? (data as SSEMessage) : null;
+        const eventType = obj?.event ?? obj?.type;
+        const upstreamChatId = obj?.chat_id ?? obj?.chatId;
+        if ((eventType === "start" || eventType === "session_start" || eventType === "metadata") && typeof upstreamChatId === "string" && upstreamChatId) {
+          chatIdRef.current = upstreamChatId;
+          setChatId(upstreamChatId);
+          appendLog(`Captured chat_id from SSE start: ${upstreamChatId}`);
+          return;
+        }
+        const token = typeof data === "string"
+          ? data
+          : (obj?.message ?? obj?.delta ?? obj?.text ?? obj?.answer ?? "");
+        if (typeof token === "string" && token.length > 0) {
+          assembledText += token;
+          const shouldFlush = /[\.!?\n]$/.test(token) || token.length >= 40;
+          player.sendText(token, { flush: shouldFlush });
+          // Update assistant message incrementally
+          try {
+            const next = currentMsgs.slice();
+            const last = next[next.length - 1] as { role: string; content: string };
+            if (last && last.role === "assistant") {
+              (next as any)[next.length - 1] = { role: "assistant", content: (last.content || "") + token };
+              currentMsgs = next as any;
+              setMessages(next as any);
+            }
+          } catch {}
+        }
+      },
+      onError: (e) => { appendLog(`Manual AI SSE error: ${String(e)} chatId=${chatIdRef.current ?? "none"}`); },
+      onDone: () => {
+        player.flush();
+        appendLog(`Manual AI SSE done; flushed TTS buffer chatId=${chatIdRef.current ?? "none"}`);
+        if (assembledText.trim().length > 0) {
+          appendLog(`AI final: "${assembledText}"`);
+        }
+        if (ttsAbortRef.current === aborter) ttsAbortRef.current = null;
+      },
+    });
+  }, [appendLog, messages, setMessages]);
+
+  // Steelbrain VAD controller (single pipeline, toggle via enabled flag)
   const vadAbortRef = useRef<AbortController | null>(null);
   const vad = useMemo(() => ({
     start: async () => {
-      // no-op if already running
-      if (vadAbortRef.current) return;
       // Ensure mic stream
       const stream = sharedStreamRef.current ?? await navigator.mediaDevices.getUserMedia({ audio: RECOMMENDED_AUDIO_CONSTRAINTS, video: false });
       if (!sharedStreamRef.current) sharedStreamRef.current = stream;
-      // Build ingest and VAD pipeline
-      const audioStream = await ingestAudioStream(stream);
-      const aborter = new AbortController();
-      vadAbortRef.current = aborter;
-      const vadTransform = speechFilter({
-        threshold: 0.3,
-        minSpeechDurationMs: 400,
-        redemptionDurationMs: 1400,
-        lookBackDurationMs: 384,
-        noEmit: true,
-        onSpeechStart: () => {
-          appendLog("VAD: speech detected (start)");
-          try { sendRef.current?.({ type: "VAD_SPEECH_START" }); } catch {}
-        },
-        onSpeechEnd: () => {
-          appendLog("VAD: speech ended (end)");
-          try { sendRef.current?.({ type: "VAD_SILENCE_TIMEOUT" }); } catch {}
-        },
-        onMisfire: () => { appendLog("VAD: misfire (too short)"); },
-        onError: (err: unknown) => { appendLog(`VAD error: ${err instanceof Error ? err.message : String(err)}`); },
-      });
-      // Start the stream pipeline (discard output) and keep it cancellable
-      void audioStream
-        .pipeThrough(vadTransform)
-        .pipeTo(new WritableStream<Float32Array>({ write() {} }), { signal: aborter.signal })
-        .catch(() => { /* aborted or errored */ });
+      try { stream.getAudioTracks().forEach((t) => { t.enabled = true; }); } catch {}
+
+      if (!vadPipelineStartedRef.current) {
+        // Build ingest and VAD pipeline once
+        const audioStream = await ingestAudioStream(stream);
+        const aborter = new AbortController();
+        vadAbortRef.current = aborter;
+        const vadTransform = speechFilter({
+          threshold: 0.45,
+          minSpeechDurationMs: 400,
+          redemptionDurationMs: 1400,
+          lookBackDurationMs: 384,
+          noEmit: true,
+          onSpeechStart: () => {
+            if (!vadEnabledRef.current) return;
+            if (!interactiveEnabledRef.current && ttsSpeakingRef.current) {
+              appendLog("VAD: speech detected (ignored; speaking & interactive off)");
+              return;
+            }
+            appendLog("VAD: speech detected (start)");
+            try { sendRef.current?.({ type: "VAD_SPEECH_START" }); } catch {}
+          },
+          onSpeechEnd: () => {
+            if (!vadEnabledRef.current) return;
+            if (!isRecordingRef.current) {
+              appendLog("VAD: speech ended (ignored; not recording)");
+              return;
+            }
+            appendLog("VAD: speech ended (end)");
+            try { sendRef.current?.({ type: "VAD_SILENCE_TIMEOUT" }); } catch {}
+          },
+          onMisfire: () => { if (vadEnabledRef.current) appendLog("VAD: misfire (too short)"); },
+          onError: (err: unknown) => { if (vadEnabledRef.current) appendLog(`VAD error: ${err instanceof Error ? err.message : String(err)}`); },
+        });
+        void audioStream
+          .pipeThrough(vadTransform)
+          .pipeTo(new WritableStream<Float32Array>({ write() {} }), { signal: aborter.signal })
+          .catch(() => { /* aborted or errored */ });
+        vadPipelineStartedRef.current = true;
+      }
+      // Enable event emission
+      vadEnabledRef.current = true;
     },
     pause: () => {
+      vadEnabledRef.current = false; // disable callbacks
+      const s = sharedStreamRef.current;
+      if (s) {
+        try { s.getAudioTracks().forEach((t) => { t.enabled = false; }); } catch {}
+      }
+    },
+  }), [appendLog]);
+
+  // Cleanup on unmount: tear down pipeline and release mic
+  useEffect(() => {
+    return () => {
       const a = vadAbortRef.current;
       if (a) {
         try { a.abort(); } catch {}
         vadAbortRef.current = null;
       }
-    },
-  }), [appendLog]);
+      vadPipelineStartedRef.current = false;
+      vadEnabledRef.current = false;
+      releaseSharedStream();
+    };
+  }, [releaseSharedStream]);
 
   const startRecording = useCallback(async () => {
     const currentState = mediaRecorderRef.current?.state;
@@ -521,7 +671,17 @@ export default function Home() {
           onClick={() => {
             clearChatId();
             chatIdRef.current = null;
-            appendLog("New conversation cleared");
+            // Clear all cached chats in React Query and localStorage
+            try {
+              queryClient.removeQueries({ queryKey: ["chat"], exact: false });
+            } catch {}
+            try {
+              for (let i = localStorage.length - 1; i >= 0; i--) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith("chat:")) localStorage.removeItem(k);
+              }
+            } catch {}
+            appendLog("New conversation cleared (cache reset)");
           }}
           aria-label="New conversation"
         >
@@ -540,6 +700,12 @@ export default function Home() {
         textareaRef={consoleRef}
         hud={hud}
         hideOverlay
+        onSpeak={manualSpeak}
+        interactiveEnabled={interactiveEnabled}
+        onToggleInteractive={(enabled) => {
+          setInteractiveEnabled(enabled);
+          appendLog(`Interactive conversation ${enabled ? "enabled" : "disabled"}`);
+        }}
       />
     </div>
   );

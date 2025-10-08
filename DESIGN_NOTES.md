@@ -70,6 +70,27 @@ Develop a voice chat POC using custom AI API endpoints, ElevenLabs (11L), and a 
    - Feed tokens directly into ElevenLabs WS TTS (`eleven_flash_v2_5`) and call `flush` at the end.
    - REST TTS endpoint `/api/tts` remains as fallback (DEPRECATED).
 
+### 2025-10-08: Switch to OpenRouter for text generation
+
+- Endpoint `src/app/api/generateAnswerStreamOpenRouter/route.ts` proxies to OpenRouter `POST https://openrouter.ai/api/v1/chat/completions`.
+- Legacy endpoint `src/app/api/generateAnswerStream/route.ts` remains and targets the bespoke upstream (`AI_BASE_URL`) with OAuth fallback.
+- Streaming behavior:
+  - When `stream=true`, we transform OpenRouter SSE (chat.completions stream with `choices[0].delta.content`) into our SSE format:
+    - Emit `{ event: "start", chat_id }` once (echoing provided `chatId` if any).
+    - Emit `{ delta: string }` for each token.
+  - Non-streaming returns `{ chat_id, answer }` to match the previous consumer expectations.
+- Environment:
+  - `OPEN_ROUTER_API_KEY` (required).
+  - Optional attribution: `OPEN_ROUTER_HTTP_REFERRER`, `OPEN_ROUTER_APP_TITLE`.
+  - `LLM_MODEL` defaults to `openai/gpt-4o` if not provided.
+- Rationale:
+  - Unified access to many models; simpler ops vs bespoke upstream. See Quickstart docs: `https://openrouter.ai/docs/quickstart`.
+- Notes:
+  - We currently pass a lightweight `system` prompt from `LLM_SYSTEM_PROMPT` (optional); fallback to a generic assistant prompt.
+  - Chat threading is still client-managed via `chatId` persistence; OpenRouter doesn't assign `chat_id` here, so we echo the inbound `chatId` in the SSE start event for continuity.
+
+Preference (2025-10-08): Prefer OpenRouter over legacy upstream for performance and formatting. Legacy envs retained for optional fallback/testing.
+
 ### Logging Policy
 
 - All user-facing actions and key voice flow state changes MUST be logged to the in-app console.
@@ -79,6 +100,13 @@ Develop a voice chat POC using custom AI API endpoints, ElevenLabs (11L), and a 
 - Moved console UI from `src/app/page.tsx` into a reusable component `src/components/Console/ConsolePanel.tsx`.
 - Default behavior: overlay hidden for less visual obstruction (`hideOverlay` default true). If needed, pass `hideOverlay={false}` to enable overlay; clicking outside will dismiss due to `dismissible` defaulting to true.
 - Rationale: separation of concerns, reusability, and simplified page component.
+
+#### 2025-10-08: Manual TTS trigger in Console
+
+- Added a single-line text input and "Speak" button to `ConsolePanel` exposed via optional `onSpeak(text)` prop.
+- When provided by the page, `onSpeak` sends the input as a user message to the AI SSE endpoint and streams tokens into an ElevenLabs WS session using `TtsWsPlayer` (skips STT).
+- Machine events `TTS_STARTED` and `TTS_ENDED` are emitted to preserve visualizer/state semantics even for manual speech.
+- Enter key submits when input is non-empty. Logs capture connect, send, and errors.
 
 ### Performance Metrics (Client)
 
@@ -107,6 +135,15 @@ Develop a voice chat POC using custom AI API endpoints, ElevenLabs (11L), and a 
   - Close active ElevenLabs WS `TtsWsPlayer` and teardown its MediaSource.
   - Cleanup TTS analyser graph and animation frame.
   - This ensures prior speech cannot overlap with new speech.
+
+#### 2025-10-08: Interactive conversation toggle
+
+- Default behavior: interruptions are disabled while AI is speaking/processing. VAD still detects speech but ignores `onSpeechStart` unless control is currently `listening_idle`/`capturing`.
+- New UI toggle in `ConsolePanel` labeled "Interactive conversation" enables interruptions. When enabled, `onSpeechStart` will dispatch `VAD_SPEECH_START` from any control state, preempting TTS/processing per state machine policy.
+- Implementation details:
+  - `page.tsx` keeps `interactiveEnabled` state and mirrors to a ref for VAD callbacks.
+  - VAD gating checks current control substate and `interactiveEnabled` to decide dispatch.
+  - `onSpeechEnd` only triggers `VAD_SILENCE_TIMEOUT` when in `capturing` to avoid unintended stops.
 
 ### Streaming Completion Semantics (2025-10-08)
 

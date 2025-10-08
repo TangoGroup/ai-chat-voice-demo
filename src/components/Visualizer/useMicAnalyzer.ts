@@ -5,6 +5,7 @@ export interface MicAnalyzerOptions {
   smoothingTimeConstant?: number;
   fftSize?: number;
   muted?: boolean; // when true, disable input track for true input mute
+  inputStream?: MediaStream; // optional external input; when provided, we won't call getUserMedia
 }
 
 export interface MicAnalyzer {
@@ -16,7 +17,7 @@ export interface MicAnalyzer {
 }
 
 export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
-  const { smoothingTimeConstant = 0.8, fftSize = 1024, muted = false } = options;
+  const { smoothingTimeConstant = 0.8, fftSize = 1024, muted = false, inputStream } = options;
 
   const [volume, setVolume] = useState<number>(0);
   const [isActive, setIsActive] = useState<boolean>(false);
@@ -27,6 +28,7 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
   const sourceRef = useRef<MediaStreamAudioSourceNode | MediaElementAudioSourceNode | null>(null);
   const rafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const ownsStreamRef = useRef<boolean>(false);
 
   const cleanup = useCallback(() => {
     if (rafRef.current !== null) {
@@ -81,8 +83,16 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
   const start = useCallback(async () => {
     try {
       if (isActive) return;
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      streamRef.current = stream;
+      let stream: MediaStream;
+      if (inputStream) {
+        stream = inputStream;
+        streamRef.current = stream;
+        ownsStreamRef.current = false;
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        streamRef.current = stream;
+        ownsStreamRef.current = true;
+      }
       const AC = getAudioContextCtor();
       if (!AC) throw new Error("AudioContext not supported");
       const audioContext = new AC();
@@ -94,8 +104,10 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
       const source = audioContext.createMediaStreamSource(stream);
       sourceRef.current = source;
       source.connect(analyser);
-      // Apply current muted state to the input track so upstream capture is actually disabled
-      try { stream.getAudioTracks().forEach((t) => { t.enabled = !muted; }); } catch {}
+      // Apply current muted state to the input track only if we own the stream
+      if (ownsStreamRef.current) {
+        try { stream.getAudioTracks().forEach((t) => { t.enabled = !muted; }); } catch {}
+      }
       setIsActive(true);
       setError(undefined);
       rafRef.current = requestAnimationFrame(tick);
@@ -104,7 +116,7 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
       setError(message);
       cleanup();
     }
-  }, [cleanup, fftSize, isActive, smoothingTimeConstant, tick, muted]);
+  }, [cleanup, fftSize, inputStream, isActive, smoothingTimeConstant, tick, muted]);
 
   // Removed attachAudioElement (unused)
 
@@ -115,7 +127,9 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
   useEffect(() => {
     const s = streamRef.current;
     if (!s) return;
-    try { s.getAudioTracks().forEach((t) => { t.enabled = !muted; }); } catch {}
+    if (ownsStreamRef.current) {
+      try { s.getAudioTracks().forEach((t) => { t.enabled = !muted; }); } catch {}
+    }
     if (muted) {
       // Force visual volume to 0 immediately to avoid decay artifacts
       lastVolumeRef.current = 0;

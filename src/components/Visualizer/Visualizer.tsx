@@ -11,9 +11,9 @@ type Tweened<T> = { current: T; target: T; start: number; duration: number };
 function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }
 function easeInOutCubic(t: number): number { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
 
-export function Visualizer({ logsRef, onHud, micMuted }: { logsRef?: React.MutableRefObject<(msg: string) => void>; onHud?: (h: { state: string; mic: number; tts: number; eff: number }) => void; micMuted?: boolean }) {
+export function Visualizer({ logsRef, onHud, micMuted, inputStream }: { logsRef?: React.MutableRefObject<(msg: string) => void>; onHud?: (h: { state: string; mic: number; tts: number; eff: number }) => void; micMuted?: boolean; inputStream?: MediaStream }) {
   const [voiceState, setVoiceState] = useState<VoiceState>("passive");
-  const { volume, start: startMic } = useMicAnalyzer({ smoothingTimeConstant: 0.8, fftSize: 1024, muted: Boolean(micMuted) });
+  const { volume, start: startMic } = useMicAnalyzer({ smoothingTimeConstant: 0.8, fftSize: 1024, muted: Boolean(micMuted), inputStream });
   const { theme } = useTheme();
   const [ttsVolume, setTtsVolume] = useState<number>(0);
 
