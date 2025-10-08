@@ -42,6 +42,7 @@ export default function Home() {
   // Interrupt policy and state refs for VAD gating
   const interactiveEnabledRef = useRef<boolean>(false);
   const isRecordingRef = useRef<boolean>(false);
+  const isListeningRef = useRef<boolean>(false);
 
   useEffect(() => {
     setCanRecord(typeof window !== "undefined" && "MediaRecorder" in window);
@@ -140,6 +141,7 @@ export default function Home() {
       ttsAbortRef.current = null;
       try { ttsPlayerRef.current?.close(); } catch {}
       ttsPlayerRef.current = null;
+      if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
       // TTS WebAudio is managed inside TtsWsPlayer; nothing to clean here beyond closing player
     },
     startCapture: () => { void startRecording(); },
@@ -155,6 +157,7 @@ export default function Home() {
       ttsAbortRef.current = null;
       try { ttsPlayerRef.current?.close(); } catch {}
       ttsPlayerRef.current = null;
+      if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
     },
     onVisualizerState: (s: VoiceVisualState) => {
       appendLog(`Visualizer -> ${s}`);
@@ -214,6 +217,18 @@ export default function Home() {
           // Notify machine that TTS finished (WS side). It will decide when to return to listening.
           ttsSpeakingRef.current = false;
           try { if (sendRef.current) sendRef.current({ type: "TTS_ENDED" }); } catch {}
+          // As a fallback, if playback end isn't observed quickly, force AUDIO_ENDED after a short delay.
+          try { if (ttsEndFallbackTimerRef.current !== null) clearTimeout(ttsEndFallbackTimerRef.current); } catch {}
+          ttsEndFallbackTimerRef.current = window.setTimeout(() => {
+            appendLog("TTS final fallback -> AUDIO_ENDED");
+            try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
+            ttsEndFallbackTimerRef.current = null;
+          }, 2000);
+        },
+        onPlaybackEnded: () => {
+          if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
+          appendLog("TTS playback ended -> AUDIO_ENDED");
+          try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
         },
         // Start with defaults; we can expose tuning later
       });
@@ -325,8 +340,9 @@ export default function Home() {
   }), [appendLog, canRecord]));
   // Keep send in a ref to avoid re-render feedback loops inside raf callbacks
   useEffect(() => { sendRef.current = send as unknown as (e: { type: string }) => void; }, [send]);
-  // Track latest recording and interactive toggle for VAD gating
+  // Track latest recording, listening state, and interactive toggle for VAD gating
   useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
+  useEffect(() => { isListeningRef.current = (state.value.control === "listening_idle" || state.value.control === "capturing"); }, [state.value.control]);
   useEffect(() => { interactiveEnabledRef.current = interactiveEnabled; }, [interactiveEnabled]);
 
   // Keep a ref to the current audio to allow interruption
@@ -337,6 +353,8 @@ export default function Home() {
   const ttsAbortRef = useRef<AbortController | null>(null);
   // Speaking state inferred for gating interruptions
   const ttsSpeakingRef = useRef<boolean>(false);
+  // Fallback timer to force AUDIO_ENDED if onended doesn't arrive
+  const ttsEndFallbackTimerRef = useRef<number | null>(null);
 
   // Manual input: send text to AI SSE and stream tokens into WS TTS (skip STT)
   const manualSpeak = useCallback(async (text: string) => {
@@ -371,7 +389,20 @@ export default function Home() {
         } catch {}
       },
       onFirstAudio: () => { ttsSpeakingRef.current = true; try { sendRef.current?.({ type: "TTS_STARTED" }); } catch {} },
-      onFinal: () => { ttsSpeakingRef.current = false; try { sendRef.current?.({ type: "TTS_ENDED" }); } catch {} },
+      onFinal: () => {
+        ttsSpeakingRef.current = false; try { sendRef.current?.({ type: "TTS_ENDED" }); } catch {}
+        try { if (ttsEndFallbackTimerRef.current !== null) clearTimeout(ttsEndFallbackTimerRef.current); } catch {}
+        ttsEndFallbackTimerRef.current = window.setTimeout(() => {
+          appendLog("TTS final fallback -> AUDIO_ENDED");
+          try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
+          ttsEndFallbackTimerRef.current = null;
+        }, 2000);
+      },
+      onPlaybackEnded: () => {
+        if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
+        appendLog("TTS playback ended -> AUDIO_ENDED");
+        try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
+      },
     });
 
     try {
@@ -480,10 +511,7 @@ export default function Home() {
           noEmit: true,
           onSpeechStart: () => {
             if (!vadEnabledRef.current) return;
-            if (!interactiveEnabledRef.current && ttsSpeakingRef.current) {
-              appendLog("VAD: speech detected (ignored; speaking & interactive off)");
-              return;
-            }
+            if (!isListeningRef.current) { appendLog("VAD: speech detected (ignored; not in listening mode)"); return; }
             appendLog("VAD: speech detected (start)");
             try { sendRef.current?.({ type: "VAD_SPEECH_START" }); } catch {}
           },

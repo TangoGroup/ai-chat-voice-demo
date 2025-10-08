@@ -20,6 +20,10 @@ export interface TtsWsPlayerOptions {
   onFirstAudio?: () => void;
   onFinal?: () => void;
   onVolume?: (v: number) => void;
+  /**
+   * Fired when the underlying HTMLAudioElement finishes playback of all buffered audio.
+   */
+  onPlaybackEnded?: () => void;
 }
 
 export class TtsWsPlayer {
@@ -48,6 +52,8 @@ export class TtsWsPlayer {
   constructor(private readonly opts: TtsWsPlayerOptions) {
     this.audioEl = new Audio();
     this.audioEl.preload = "auto";
+    // Reflect playback end to consumer for state transitions
+    this.audioEl.onended = () => { try { this.opts.onPlaybackEnded?.(); } catch {} };
   }
 
   async connect(): Promise<void> {

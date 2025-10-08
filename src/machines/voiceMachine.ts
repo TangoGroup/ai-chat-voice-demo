@@ -228,6 +228,8 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
               STOP_ALL: { target: "listening_idle", actions: ["stopPlayback", "startListeningInfra", "clearStreaming"] },
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture", "clearStreaming"] },
               TTS_ENDED: { target: "listening_idle", actions: "clearStreaming" },
+              // When actual audio playback finishes, return immediately
+              AUDIO_ENDED: { target: "listening_idle", actions: "clearStreaming" },
             },
           },
           playing: {
