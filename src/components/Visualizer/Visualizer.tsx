@@ -16,6 +16,11 @@ export function Visualizer({ logsRef, onHud, micMuted, inputStream }: { logsRef?
   const { volume, start: startMic } = useMicAnalyzer({ smoothingTimeConstant: 0.8, fftSize: 1024, muted: Boolean(micMuted), inputStream });
   const { theme } = useTheme();
   const [ttsVolume, setTtsVolume] = useState<number>(0);
+  // Crossfade mic↔TTS and smooth the effective envelope to avoid jitter
+  const ttsBlendRef = useRef<number>(0); // 0 → mic, 1 → TTS
+  const smoothedEffRef = useRef<number>(0);
+  const lastNowRef = useRef<number>(typeof performance !== "undefined" ? performance.now() : 0);
+  const lastTtsAboveRef = useRef<number>(0);
 
   // Global mic start on mount
   useEffect(() => { void startMic(); }, [startMic]);
@@ -41,6 +46,29 @@ export function Visualizer({ logsRef, onHud, micMuted, inputStream }: { logsRef?
     let raf = 0;
     const step = () => {
       setTick(performance.now());
+      // Time delta in ms for time-constant smoothing
+      const now = performance.now();
+      const dtMs = Math.max(0, now - lastNowRef.current);
+      lastNowRef.current = now;
+
+      // Choose source with hysteresis to prevent ping-pong
+      const micVolRaw = micMuted ? 0 : volume;
+      if (ttsVolume > 0.03) lastTtsAboveRef.current = now;
+      const ttsHoldActive = (now - lastTtsAboveRef.current) < 150; // ms
+      const preferTts = (voiceState === "speaking") || ttsHoldActive || (ttsVolume > 0.03 && micVolRaw < 0.02);
+
+      // Smooth crossfade weight (approx 120ms time constant)
+      const tauBlendMs = 120;
+      const alphaBlend = 1 - Math.exp(-dtMs / Math.max(1, tauBlendMs));
+      const targetBlend = preferTts ? 1 : 0;
+      ttsBlendRef.current += (targetBlend - ttsBlendRef.current) * alphaBlend;
+
+      // Blend sources then smooth overall envelope (approx 100ms time constant)
+      const blended = micVolRaw * (1 - ttsBlendRef.current) + ttsVolume * ttsBlendRef.current;
+      const tauEnvMs = 100;
+      const alphaEnv = 1 - Math.exp(-dtMs / Math.max(1, tauEnvMs));
+      smoothedEffRef.current += (blended - smoothedEffRef.current) * alphaEnv;
+ 
       const t = (performance.now() - tween.start) / tween.duration;
       if (t >= 1 && tween.current !== tween.target) {
         setTween((s) => ({ ...s, current: s.target }));
@@ -49,7 +77,7 @@ export function Visualizer({ logsRef, onHud, micMuted, inputStream }: { logsRef?
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [tween.start, tween.duration, tween.current, tween.target]);
+  }, [tween.start, tween.duration, tween.current, tween.target, voiceState, micMuted, volume, ttsVolume]);
 
   // Compute blended config every render using eased progress
   const configNow = useMemo(() => {
@@ -129,8 +157,7 @@ export function Visualizer({ logsRef, onHud, micMuted, inputStream }: { logsRef?
   const displayPointColor = useMemo(() => (theme === "dark" ? "#ffffff" : "#171717"), [theme]);
   const displayGlowColor = useMemo(() => (theme === "dark" ? "#ffffff" : "#171717"), [theme]);
   // If mic is muted, zero out mic contribution. While speaking, prefer TTS volume regardless of mic.
-  const micVol = micMuted ? 0 : volume;
-  const effectiveVolume = voiceState === "speaking" && ttsVolume > 0.02 ? ttsVolume : micVol;
+  const effectiveVolume = smoothedEffRef.current;
   // Combine state-configured baseline volume with live envelope and normalize to [0,1]
   const visualVolume = Math.max(0, Math.min(1, (configNow.volume ?? 0) + effectiveVolume));
 

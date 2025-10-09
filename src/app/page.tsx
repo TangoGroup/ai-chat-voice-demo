@@ -67,6 +67,20 @@ export default function Home() {
     setLogs((prev) => [...prev, `[${timestamp}] ${message}`]);
   }, []);
 
+  // Lightweight log filter to reduce noisy entries in the console HUD
+  const shouldSuppressLog = useCallback((message: string): boolean => {
+    if (/^SSE token len=/.test(message)) return true;
+    if (/^TTS queued token$/.test(message)) return true;
+    if (/^TTS WS -> text \(/.test(message)) return true;
+    if (/^TTS WS closed \(code=1008 reason="Have not received a new text input/.test(message)) return true;
+    return false;
+  }, []);
+
+  const appendLogFiltered = useCallback((message: string) => {
+    if (shouldSuppressLog(message)) return;
+    appendLog(message);
+  }, [appendLog, shouldSuppressLog]);
+
   const clearLogs = useCallback(() => { setLogs([]); }, []);
   // Hook Visualizer into the in-app console HUD
   const vizLogsRef = useRef<(msg: string) => void>(() => {});
@@ -201,7 +215,7 @@ export default function Home() {
         modelId,
         // Encourage faster time-to-first-audio with shorter initial chunk
         chunkLengthSchedule: [80, 120, 180, 240],
-        onLog: appendLog,
+        onLog: appendLogFiltered,
         onVolume: (vol: number) => {
           try {
             type VoiceStateEventDetail = { state?: VoiceVisualState; ttsVolume?: number };
@@ -217,16 +231,9 @@ export default function Home() {
           // Notify machine that TTS finished (WS side). It will decide when to return to listening.
           ttsSpeakingRef.current = false;
           try { if (sendRef.current) sendRef.current({ type: "TTS_ENDED" }); } catch {}
-          // As a fallback, if playback end isn't observed quickly, force AUDIO_ENDED after a short delay.
-          try { if (ttsEndFallbackTimerRef.current !== null) clearTimeout(ttsEndFallbackTimerRef.current); } catch {}
-          ttsEndFallbackTimerRef.current = window.setTimeout(() => {
-            appendLog("TTS final fallback -> AUDIO_ENDED");
-            try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
-            ttsEndFallbackTimerRef.current = null;
-          }, 2000);
+          // Fallback disabled: rely solely on onPlaybackEnded from the audio element
         },
         onPlaybackEnded: () => {
-          if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
           appendLog("TTS playback ended -> AUDIO_ENDED");
           try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
         },
@@ -299,13 +306,7 @@ export default function Home() {
           if (typeof token === "string" && token.length > 0) {
             assembledText += token;
             const shouldFlush = /[\.!?\n]$/.test(token) || token.length >= 40;
-            // Debug: token preview and flush
-            try {
-              const preview = token.replace(/\n/g, "\\n").slice(0, 64);
-              appendLog(`SSE token len=${token.length} flush=${shouldFlush} preview="${preview}${token.length > 64 ? "…" : ""}"`);
-            } catch {}
             player.sendText(token, { flush: shouldFlush });
-            try { appendLog("TTS queued token"); } catch {}
             // Update assistant message incrementally in chat cache
             try {
               const next = currentMsgs.slice();
@@ -323,8 +324,7 @@ export default function Home() {
           // Force out any buffered text for very short endings
           player.flush();
           appendLog(`AI SSE done; flushed TTS buffer chatId=${chatIdRef.current ?? "none"}`);
-          // Explicitly finalize the TTS WS session now that upstream SSE completed
-          try { player.endSession(); appendLog("TTS WS: client_end sent"); } catch {}
+          // Do not explicitly close the TTS WS here; let ElevenLabs send final chunks and isFinal
           if (assembledText.trim().length > 0) {
             appendLog(`AI final: "${assembledText}"`);
             // Final state already in cache via incremental updates
@@ -383,7 +383,7 @@ export default function Home() {
       voiceId,
       modelId,
       chunkLengthSchedule: [80, 120, 180, 240],
-      onLog: appendLog,
+      onLog: appendLogFiltered,
       onVolume: (vol: number) => {
         try {
           type VoiceStateEventDetail = { state?: import("@/machines/voiceMachine").VoiceVisualState; ttsVolume?: number };
@@ -393,15 +393,9 @@ export default function Home() {
       onFirstAudio: () => { ttsSpeakingRef.current = true; try { sendRef.current?.({ type: "TTS_STARTED" }); } catch {} },
       onFinal: () => {
         ttsSpeakingRef.current = false; try { sendRef.current?.({ type: "TTS_ENDED" }); } catch {}
-        try { if (ttsEndFallbackTimerRef.current !== null) clearTimeout(ttsEndFallbackTimerRef.current); } catch {}
-        ttsEndFallbackTimerRef.current = window.setTimeout(() => {
-          appendLog("TTS final fallback -> AUDIO_ENDED");
-          try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
-          ttsEndFallbackTimerRef.current = null;
-        }, 2000);
+        // Fallback disabled: rely solely on onPlaybackEnded from the audio element
       },
       onPlaybackEnded: () => {
-        if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
         appendLog("TTS playback ended -> AUDIO_ENDED");
         try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
       },

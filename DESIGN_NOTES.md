@@ -150,9 +150,10 @@ Preference (2025-10-08): Prefer OpenRouter over legacy upstream for performance 
 - Requirement: return to `listening_idle` on actual playback end; close the TTS WS as soon as SSE completes.
 - Implementation:
   - `processActor` completion transitions to `speaking_streaming` for streaming path.
-  - On SSE `onDone`, we `flush()` then immediately `endSession()` (call `endOfStream()` and `ws.close(1000,"client_end")`).
+- On SSE `onDone`, we `flush()` and do not explicitly close the WS. Let ElevenLabs stream finish and close naturally; the UI transitions on actual `onended`.
   - `audioEl.onended` triggers `AUDIO_ENDED` → machine goes back to `listening_idle`.
   - `TTS_ENDED` is informational only.
+  - Fallback timer removed (2025-10-09): we no longer synthesize `AUDIO_ENDED` after a delay. We rely strictly on the playback `ended` event.
   - REST TTS path unchanged.
 
 ## State Machine (XState v5)
@@ -232,6 +233,11 @@ VAD is `on` for all control states except `ready` and `error`.
 
 - Change: replaced MSE-based playback in `TtsWsPlayer` with Web Audio decode+schedule pipeline and internal analyser. Exposed `onVolume(v:number)` for visualizer HUD and state.
 - Rationale: deterministic metering across platforms, no dependency on DOM audio element or captureStream, reduced routing pitfalls, simpler gain/ducking.
+
+#### 2025-10-09: Playback diagnostics
+
+- Added diagnostics in `TtsWsPlayer` for `audioEl` (`onpause`, `onerror`, `onstalled`) and `AudioContext.onstatechange`.
+- Purpose: detect browser suspensions, stalls, or element errors that could appear as early playback stops.
 
 
 ### Chat Threading (2025-10-05)

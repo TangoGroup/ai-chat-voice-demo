@@ -56,6 +56,10 @@ export class TtsWsPlayer {
     this.audioEl.preload = "auto";
     // Reflect playback end to consumer for state transitions
     this.audioEl.onended = () => { try { this.opts.onPlaybackEnded?.(); } catch {} };
+    // Diagnostics: log pause, error, and stalled conditions
+    this.audioEl.onpause = () => { try { this.opts.onLog?.("TTS WS: audioEl paused"); } catch {} };
+    this.audioEl.onerror = () => { try { this.opts.onLog?.("TTS WS: audioEl error"); } catch {} };
+    this.audioEl.onstalled = () => { try { this.opts.onLog?.("TTS WS: audioEl stalled"); } catch {} };
   }
 
   async connect(): Promise<void> {
@@ -224,8 +228,9 @@ export class TtsWsPlayer {
         ws.onclose = (ev) => {
           if (onLog) onLog(`TTS WS closed (code=${ev.code} reason="${ev.reason}")`);
           this.endOfStream();
-          // Early close before any audio: progress fallback stages
-          if (!this.firstAudioResolved && this.retryStage < 2) {
+          // Only auto-retry if not an intentional client close
+          const intentional = ev.code === 1000 && ev.reason === "client_end";
+          if (!intentional && !this.firstAudioResolved && this.retryStage < 2) {
             try {
               this.retryStage += 1;
               if (onLog) onLog(`TTS WS: retrying with stage=${this.retryStage === 1 ? "MP3" : "Blob"}`);
@@ -340,6 +345,11 @@ export class TtsWsPlayer {
       if (!AC) return;
       const ctx = new AC();
       void ctx.resume().catch(() => {});
+      // Diagnostics: log AudioContext state changes that could mute metering or playback
+      try {
+        ctx.onstatechange = () => { try { this.opts.onLog?.(`TTS WS: AudioContext state=${ctx.state}`); } catch {} };
+        this.opts.onLog?.(`TTS WS: AudioContext created state=${ctx.state}`);
+      } catch {}
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.85;
