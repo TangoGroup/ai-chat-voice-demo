@@ -323,6 +323,8 @@ export default function Home() {
           // Force out any buffered text for very short endings
           player.flush();
           appendLog(`AI SSE done; flushed TTS buffer chatId=${chatIdRef.current ?? "none"}`);
+          // Explicitly finalize the TTS WS session now that upstream SSE completed
+          try { player.endSession(); appendLog("TTS WS: client_end sent"); } catch {}
           if (assembledText.trim().length > 0) {
             appendLog(`AI final: "${assembledText}"`);
             // Final state already in cache via incremental updates
@@ -511,6 +513,11 @@ export default function Home() {
           noEmit: true,
           onSpeechStart: () => {
             if (!vadEnabledRef.current) return;
+            if (interactiveEnabledRef.current) {
+              appendLog("VAD: speech detected (interactive preempt)");
+              try { sendRef.current?.({ type: "VAD_SPEECH_START" }); } catch {}
+              return;
+            }
             if (!isListeningRef.current) { appendLog("VAD: speech detected (ignored; not in listening mode)"); return; }
             appendLog("VAD: speech detected (start)");
             try { sendRef.current?.({ type: "VAD_SPEECH_START" }); } catch {}
@@ -665,7 +672,7 @@ export default function Home() {
             {state.value.control !== "ready" && state.value.control !== "error" ? <Square className="h-6 w-6" /> : <Speech className="h-6 w-6" />}
           </GlassButton>
 
-          <GlassButton
+          {/* <GlassButton
             aria-label={isMicMuted ? "Unmute mic" : "Mute mic"}
             onClick={() => {
               const next = !isMicMuted;
@@ -689,7 +696,7 @@ export default function Home() {
             size="sm"
           >
             {isMicMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-          </GlassButton>
+          </GlassButton> */}
         </div>
       </div>
       <div className="fixed top-4 right-4 z-50 flex gap-2">

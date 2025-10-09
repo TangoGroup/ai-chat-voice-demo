@@ -48,6 +48,8 @@ export class TtsWsPlayer {
   private fallbackChunks: ArrayBuffer[] = [];
   private preferMp4 = true;
   private retryStage = 0; // 0=try MP4, 1=try MP3, 2=Blob fallback
+  // Session control
+  private lastChunkAtMs: number | null = null;
 
   constructor(private readonly opts: TtsWsPlayerOptions) {
     this.audioEl = new Audio();
@@ -76,6 +78,7 @@ export class TtsWsPlayer {
     this.useBlobFallback = false;
     this.fallbackChunks = [];
     this.chosenSourceBufferMime = null;
+    this.lastChunkAtMs = null;
 
     // Prepare MediaSource for MP4/AAC if supported; else MP3; else Blob fallback
     if (this.retryStage === 2) {
@@ -180,6 +183,7 @@ export class TtsWsPlayer {
               } else {
                 this.enqueue(bytes);
               }
+              this.lastChunkAtMs = performance.now();
               if (!this.firstAudioResolved) {
                 this.firstAudioResolved = true;
                 // Initialize analyser for HUD volume
@@ -228,9 +232,6 @@ export class TtsWsPlayer {
               void this.connect();
             } catch {}
           }
-          // If we did produce audio, ensure consumers are notified playback is done.
-          // In some environments, MSE 'ended' may not fire reliably on close.
-          try { if (this.firstAudioResolved) this.opts.onPlaybackEnded?.(); } catch {}
         };
       } catch (err) {
         reject(err);
@@ -267,6 +268,14 @@ export class TtsWsPlayer {
     this.teardownMedia("close");
   }
 
+  /**
+   * Immediately finalize playback and close the WS. Use when upstream SSE completes.
+   */
+  endSession() {
+    try { this.endOfStream(); } catch {}
+    try { this.ws?.close(1000, "client_end"); } catch {}
+  }
+
   private enqueue(bytes: ArrayBuffer) {
     this.pendingChunks.push(bytes);
     this.drainQueue();
@@ -301,6 +310,8 @@ export class TtsWsPlayer {
       this.addAutoplayClickHandler();
     }
   }
+
+  // removed watchdog finalization; using explicit endSession on SSE completion
 
   private addAutoplayClickHandler() {
     if (this.autoplayClickHandlerAdded) return;

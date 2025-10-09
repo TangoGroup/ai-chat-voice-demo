@@ -145,15 +145,15 @@ Preference (2025-10-08): Prefer OpenRouter over legacy upstream for performance 
   - VAD gating checks current control substate and `interactiveEnabled` to decide dispatch.
   - `onSpeechEnd` only triggers `VAD_SILENCE_TIMEOUT` when in `capturing` to avoid unintended stops.
 
-### Streaming Completion Semantics (2025-10-08)
+### Streaming Completion Semantics (2025-10-09)
 
-- Requirement: control returns to `listening_idle` after both AI SSE has finished AND TTS WS playback has ended — whichever completes later.
+- Requirement: return to `listening_idle` on actual playback end; close the TTS WS as soon as SSE completes.
 - Implementation:
-  - Added context flags in `voiceMachine`: `isStreaming`, `streamSseDone`, `streamTtsDone`.
-  - `page.tsx` dispatches `TTS_STARTED` on first audio and `TTS_ENDED` on WS `onFinal`.
-  - When `processActor` (SSE) completes, if TTS already ended, transition to `listening_idle`; else transition to `speaking_streaming` and wait for `TTS_ENDED`.
-  - Guards `isStreaming` and `isStreamingAndTtsDone` coordinate transitions.
-  - `clearStreaming` resets flags on completion or interrupts.
+  - `processActor` completion transitions to `speaking_streaming` for streaming path.
+  - On SSE `onDone`, we `flush()` then immediately `endSession()` (call `endOfStream()` and `ws.close(1000,"client_end")`).
+  - `audioEl.onended` triggers `AUDIO_ENDED` → machine goes back to `listening_idle`.
+  - `TTS_ENDED` is informational only.
+  - REST TTS path unchanged.
 
 ## State Machine (XState v5)
 

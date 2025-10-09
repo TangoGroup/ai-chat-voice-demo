@@ -210,10 +210,8 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
               input: ({ context }) => ({ blob: context.recordingBlob! }),
               onDone: [
                 { guard: "hasAudioBuffer", target: "playing", actions: "storeProcessOutput" },
-                // Streaming path: SSE finished. If TTS already ended, go back to listening; otherwise wait.
-                { guard: "isStreamingAndTtsDone", target: "listening_idle", actions: ["storeProcessOutput", "markSseDone", "clearStreaming"] },
-                { guard: "isStreaming", target: "speaking_streaming", actions: ["storeProcessOutput", "markSseDone"] },
-                { target: "listening_idle", actions: "storeProcessOutput" },
+                // Streaming path: SSE finished. Always enter speaking_streaming and wait for actual playback end.
+                { target: "speaking_streaming", actions: ["storeProcessOutput", "markSseDone"] },
               ],
               onError: {
                 target: "error",
@@ -227,7 +225,6 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture", "clearStreaming"] },
-              TTS_ENDED: { target: "listening_idle", actions: "clearStreaming" },
               // When actual audio playback finishes, return immediately
               AUDIO_ENDED: { target: "listening_idle", actions: "clearStreaming" },
             },
