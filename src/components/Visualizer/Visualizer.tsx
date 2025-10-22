@@ -11,9 +11,9 @@ type Tweened<T> = { current: T; target: T; start: number; duration: number };
 function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }
 function easeInOutCubic(t: number): number { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
 
-export function Visualizer({ logsRef, onHud, micMuted, inputStream }: { logsRef?: React.MutableRefObject<(msg: string) => void>; onHud?: (h: { state: string; mic: number; tts: number; eff: number }) => void; micMuted?: boolean; inputStream?: MediaStream }) {
+export function Visualizer({ onHud, inputStream }: { onHud?: (h: { state: string; mic: number; tts: number; eff: number }) => void; inputStream?: MediaStream }) {
   const [voiceState, setVoiceState] = useState<VoiceState>("passive");
-  const { volume, start: startMic } = useMicAnalyzer({ smoothingTimeConstant: 0.8, fftSize: 1024, muted: Boolean(micMuted), inputStream });
+  const { volume, start: startMic } = useMicAnalyzer({ smoothingTimeConstant: 0.8, fftSize: 1024, inputStream });
   const { theme } = useTheme();
   const [ttsVolume, setTtsVolume] = useState<number>(0);
   // Crossfade mic↔TTS and smooth the effective envelope to avoid jitter
@@ -52,10 +52,9 @@ export function Visualizer({ logsRef, onHud, micMuted, inputStream }: { logsRef?
       lastNowRef.current = now;
 
       // Choose source with hysteresis to prevent ping-pong
-      const micVolRaw = micMuted ? 0 : volume;
       if (ttsVolume > 0.03) lastTtsAboveRef.current = now;
       const ttsHoldActive = (now - lastTtsAboveRef.current) < 150; // ms
-      const preferTts = (voiceState === "speaking") || ttsHoldActive || (ttsVolume > 0.03 && micVolRaw < 0.02);
+      const preferTts = (voiceState === "speaking") || ttsHoldActive || (ttsVolume > 0.03 && volume < 0.02);
 
       // Smooth crossfade weight (approx 120ms time constant)
       const tauBlendMs = 120;
@@ -64,7 +63,7 @@ export function Visualizer({ logsRef, onHud, micMuted, inputStream }: { logsRef?
       ttsBlendRef.current += (targetBlend - ttsBlendRef.current) * alphaBlend;
 
       // Blend sources then smooth overall envelope (approx 100ms time constant)
-      const blended = micVolRaw * (1 - ttsBlendRef.current) + ttsVolume * ttsBlendRef.current;
+      const blended = volume * (1 - ttsBlendRef.current) + ttsVolume * ttsBlendRef.current;
       const tauEnvMs = 100;
       const alphaEnv = 1 - Math.exp(-dtMs / Math.max(1, tauEnvMs));
       smoothedEffRef.current += (blended - smoothedEffRef.current) * alphaEnv;
@@ -77,7 +76,7 @@ export function Visualizer({ logsRef, onHud, micMuted, inputStream }: { logsRef?
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [tween.start, tween.duration, tween.current, tween.target, voiceState, micMuted, volume, ttsVolume]);
+  }, [tween.start, tween.duration, tween.current, tween.target, voiceState, volume, ttsVolume]);
 
   // Compute blended config every render using eased progress
   const configNow = useMemo(() => {

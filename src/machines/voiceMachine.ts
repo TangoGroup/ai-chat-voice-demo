@@ -123,8 +123,9 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       hasAudioBuffer: (params) => {
         const evt = params.event as unknown;
         if (!isProcessDoneEvent(evt)) return false;
-        const buf = evt.output?.audioBuffer;
-        return buf instanceof ArrayBuffer && buf.byteLength > 0;
+        const buf = (evt as { output?: { audioBuffer?: unknown } }).output?.audioBuffer as unknown;
+        const byteLength = (buf as { byteLength?: unknown })?.byteLength;
+        return typeof byteLength === "number" && byteLength > 0;
       },
       isStreaming: ({ context }) => {
         return context.isStreaming === true && (!context.streamSseDone || !context.streamTtsDone);

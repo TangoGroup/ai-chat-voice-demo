@@ -124,7 +124,7 @@ Preference (2025-10-08): Prefer OpenRouter over legacy upstream for performance 
 
 ### Deprecations
 
-- REST-based TTS flow (`/api/tts` + arrayBuffer playback in `page.tsx`) is DEPRECATED; retained as fallback.
+- REST-based TTS flow is removed from `page.tsx`. Only WS TTS streaming is supported.
 
 ### Interrupt Semantics
 
@@ -238,6 +238,34 @@ VAD is `on` for all control states except `ready` and `error`.
 
 - Added diagnostics in `TtsWsPlayer` for `audioEl` (`onpause`, `onerror`, `onstalled`) and `AudioContext.onstatechange`.
 - Purpose: detect browser suspensions, stalls, or element errors that could appear as early playback stops.
+
+
+### Testing Strategy (2025-10-12)
+
+- Unit test the `voiceMachine` transitions to protect core flow before refactors.
+  - Buffered path: ready → listening_idle → capturing → processing → playing → listening_idle.
+  - Streaming path: processing → speaking_streaming → AUDIO_ENDED → listening_idle; TTS_STARTED/TTS_ENDED are informational.
+- Test runner: Vitest with pure TS tests (no DOM), using `xstate` `createActor` to drive the machine and fake `processPipeline`.
+- Scope: No visualizer tests; visualizer will be extracted to a package.
+
+### AI Provider Adapter Plan (sketch)
+
+- Interface `AiTextStream`:
+  - `start(prompt, opts): { abort(), onDelta(cb), onDone(cb), onError(cb) }`.
+  - Emits deltas as plain strings; consumer handles token-to-tts piping.
+- Implement `OpenRouterAdapter` now; keep legacy adapter only if used.
+- Client-side glue remains in the controller; adapters are testable in isolation.
+
+### Config Strategy (2025-10-12)
+
+- Keep direct env reads where needed for now; centralization deferred.
+- `env.example` retains server-side `ELEVENLABS_*` and optional `NEXT_PUBLIC_*` where currently used.
+
+### SSE Client Responsibilities (sketch)
+
+- Minimal client: fetch SSE endpoint, parse `data:` lines, invoke callbacks.
+- Responsibilities: backoff on network errors (optional), abort via `AbortSignal`, normalize CRLF.
+- No side-effects (no DOM), reusable in tests and controller.
 
 
 ### Chat Threading (2025-10-05)

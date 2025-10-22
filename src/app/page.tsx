@@ -11,16 +11,16 @@ import { createStopwatch, formatMs, getStoredChatId, setChatId, clearChatId } fr
 import { TtsWsPlayer } from "@/lib/ttsWs";
 import { streamSSE } from "@/lib/sse";
 import { useChat, type ChatMessage } from "@/lib/chat";
+import { OpenRouterAdapter } from "@/lib/aiAdapter";
 import { GlassButton } from "@/components/ui/glass-button";
 import { useQueryClient } from "@tanstack/react-query";
 import { type VoiceVisualState } from "@/machines/voiceMachine";
-import { useVoiceService } from "@/machines/useVoiceService";
+import { useVoiceController } from "@/features/voice";
 import ConsolePanel from "@/components/Console/ConsolePanel";
 
 export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [isRecording, setIsRecording] = useState<boolean>(false);
-  const [isMicMuted, setIsMicMuted] = useState<boolean>(false);
   const [interactiveEnabled, setInteractiveEnabled] = useState<boolean>(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -128,7 +128,7 @@ export default function Home() {
   
 
   // Machine wiring must be created before callbacks that reference `send`
-  const [state, send] = useVoiceService(useMemo(() => ({
+  const { snapshot: state, send } = useVoiceController(useMemo(() => ({
     onStartListening: async () => {
       if (!canRecord) return;
       appendLog("Starting listening…");
@@ -153,6 +153,8 @@ export default function Home() {
       // Interrupt any ongoing AI/TTS streaming
       try { ttsAbortRef.current?.abort(); } catch {}
       ttsAbortRef.current = null;
+      try { aiAbortRef.current?.abort(); } catch {}
+      aiAbortRef.current = null;
       try { ttsPlayerRef.current?.close(); } catch {}
       ttsPlayerRef.current = null;
       if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
@@ -193,8 +195,9 @@ export default function Home() {
       const transcribedText = (sttData?.transcription || sttData?.text || "").trim();
       if (!transcribedText) throw new Error("No transcription captured");
       appendLog(`Transcribed: "${transcribedText}"`);
-      // Streaming path: AI SSE -> ElevenLabs WS TTS
-      appendLog(`Starting AI SSE (stream=true)… chatId=${chatIdRef.current ?? "none"}`);
+
+      // Streaming path: AI SSE -> ElevenLabs WS TTS via adapter
+      appendLog(`Starting AI streaming… chatId=${chatIdRef.current ?? "none"}`);
       const apiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY || "";
       const modelId = process.env.NEXT_PUBLIC_ELEVENLABS_MODEL_ID || process.env.ELEVENLABS_MODEL_ID || "eleven_flash_v2_5";
       const voiceId = process.env.NEXT_PUBLIC_ELEVENLABS_VOICE_ID || process.env.ELEVENLABS_VOICE_ID || "";
@@ -209,11 +212,13 @@ export default function Home() {
       ttsAbortRef.current = null;
       try { ttsPlayerRef.current?.close(); } catch {}
       ttsPlayerRef.current = null;
+      try { aiAbortRef.current?.abort(); } catch {}
+      aiAbortRef.current = null;
+
       const player = new TtsWsPlayer({
         apiKey,
         voiceId,
         modelId,
-        // Encourage faster time-to-first-audio with shorter initial chunk
         chunkLengthSchedule: [80, 120, 180, 240],
         onLog: appendLogFiltered,
         onVolume: (vol: number) => {
@@ -223,23 +228,18 @@ export default function Home() {
           } catch {}
         },
         onFirstAudio: () => {
-          // Notify state machine; it will drive the visualizer deterministically
           ttsSpeakingRef.current = true;
           try { if (sendRef.current) sendRef.current({ type: "TTS_STARTED" }); } catch {}
         },
         onFinal: () => {
-          // Notify machine that TTS finished (WS side). It will decide when to return to listening.
           ttsSpeakingRef.current = false;
           try { if (sendRef.current) sendRef.current({ type: "TTS_ENDED" }); } catch {}
-          // Fallback disabled: rely solely on onPlaybackEnded from the audio element
         },
         onPlaybackEnded: () => {
           appendLog("TTS playback ended -> AUDIO_ENDED");
           try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
         },
-        // Start with defaults; we can expose tuning later
       });
-      // No output mute here; mic mute handled via VAD pause/resume
 
       try {
         await player.connect();
@@ -251,87 +251,75 @@ export default function Home() {
       const wsStartMs = sw.splitMs();
       appendLog(`TTS WS connected (${formatMs(wsStartMs)})`);
 
-      const aborter = new AbortController();
-      ttsAbortRef.current = aborter;
+      const ttsAborter = new AbortController();
+      ttsAbortRef.current = ttsAborter;
       ttsPlayerRef.current = player;
-      let assembledText = "";
-      // Seed chat with user + placeholder assistant locally (no extra network)
+
+      // Seed chat with user + placeholder assistant locally
       const seedBase: ReadonlyArray<ChatMessage> = messages.length === 0 ? [{ role: "system", content: "" }] : [];
       let currentMsgs: ChatMessage[] = [...seedBase, ...messages, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
       try { setMessages(currentMsgs); } catch {}
-      // Debug: outbound SSE request summary
-      try { appendLog(`AI SSE request → messages=${currentMsgs.length - 1}`); } catch {}
-      await streamSSE("/api/generateAnswerStreamOpenRouter", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          stream: true,
-          ...(chatIdRef.current ? { chatId: chatIdRef.current } : {}),
-          messages: (() => {
-            const base: ReadonlyArray<ChatMessage> = messages.length === 0 ? [{ role: "system", content: "" }] : [];
-            const withUser: ChatMessage[] = [...base, ...messages, { role: "user", content: transcribedText }];
-            return withUser.slice(-24); // crude trim here; exact trim done server-side too
-          })(),
-        }),
-        signal: aborter.signal,
-      }, {
-        onMessage: (data) => {
-          type SSEMessage = {
-            event?: string;
-            type?: string;
-            chat_id?: string;
-            chatId?: string;
-            message?: string;
-            delta?: string;
-            text?: string;
-            answer?: string;
-          };
-          const obj: SSEMessage | null = (typeof data === "object" && data !== null) ? (data as SSEMessage) : null;
-          const eventType = obj?.event ?? obj?.type;
-          const upstreamChatId = obj?.chat_id ?? obj?.chatId;
-          if ((eventType === "start" || eventType === "session_start" || eventType === "metadata") && typeof upstreamChatId === "string" && upstreamChatId) {
-            chatIdRef.current = upstreamChatId;
-            setChatId(upstreamChatId);
-            appendLog(`SSE start: chat_id=${upstreamChatId}`);
-            return;
-          }
-          if (eventType === "error") {
-            const msg = (typeof data === "object" && data && "message" in (data as Record<string, unknown>)) ? String((data as Record<string, unknown>).message) : (obj?.message ?? "unknown");
-            appendLog(`SSE error event: ${String(msg)}`);
-            return;
-          }
-          const token = typeof data === "string"
-            ? data
-            : (obj?.message ?? obj?.delta ?? obj?.text ?? obj?.answer ?? "");
-          if (typeof token === "string" && token.length > 0) {
-            assembledText += token;
-            const shouldFlush = /[\.!?\n]$/.test(token) || token.length >= 40;
-            player.sendText(token, { flush: shouldFlush });
-            // Update assistant message incrementally in chat cache
-            try {
-              const next = currentMsgs.slice();
-              const last = next[next.length - 1];
-              if (last && last.role === "assistant") {
-                next[next.length - 1] = { role: "assistant", content: (last.content || "") + token };
-                currentMsgs = next;
-                setMessages(next);
-              }
-            } catch {}
-          }
-        },
-        onError: (e) => { appendLog(`AI SSE error: ${String(e)} chatId=${chatIdRef.current ?? "none"}`); },
-        onDone: () => {
-          // Force out any buffered text for very short endings
-          player.flush();
-          appendLog(`AI SSE done; flushed TTS buffer chatId=${chatIdRef.current ?? "none"}`);
-          // Do not explicitly close the TTS WS here; let ElevenLabs send final chunks and isFinal
-          if (assembledText.trim().length > 0) {
-            appendLog(`AI final: "${assembledText}"`);
-            // Final state already in cache via incremental updates
-          }
-          // Mark SSE session as completed
-          if (ttsAbortRef.current === aborter) ttsAbortRef.current = null;
-        },
+      appendLog(`AI request → messages=${currentMsgs.length - 1}`);
+
+      const aiAborter = new AbortController();
+      aiAbortRef.current = aiAborter;
+      let assembledText = "";
+
+      const aiAdapter = new OpenRouterAdapter();
+      const aiHandle = aiAdapter.start({
+        model: process.env.LLM_MODEL || "openai/gpt-4o",
+        messages: (() => {
+          const base: ReadonlyArray<ChatMessage> = messages.length === 0 ? [{ role: "system", content: "" }] : [];
+          const withUser: ChatMessage[] = [...base, ...messages, { role: "user", content: transcribedText }];
+          return withUser.slice(-24);
+        })(),
+        signal: aiAborter.signal,
+        chatId: chatIdRef.current,
+      });
+
+      aiHandle.onDelta((token) => {
+        if (token.length > 0) {
+          assembledText += token;
+          const shouldFlush = /[\.!?\n]$/.test(token) || token.length >= 40;
+          player.sendText(token, { flush: shouldFlush });
+          // Update assistant message incrementally
+          try {
+            const next = currentMsgs.slice();
+            const last = next[next.length - 1];
+            if (last && last.role === "assistant") {
+              next[next.length - 1] = { role: "assistant", content: (last.content || "") + token };
+              currentMsgs = next;
+              setMessages(next);
+            }
+          } catch {}
+        }
+      });
+
+      aiHandle.onDone(() => {
+        player.flush();
+        appendLog(`AI done; flushed TTS buffer chatId=${chatIdRef.current ?? "none"}`);
+        if (assembledText.trim().length > 0) {
+          appendLog(`AI final: "${assembledText}"`);
+        }
+        if (aiAbortRef.current === aiAborter) aiAbortRef.current = null;
+      });
+
+      aiHandle.onError((e) => {
+        appendLog(`AI error: ${String(e)} chatId=${chatIdRef.current ?? "none"}`);
+      });
+
+      // Wait for AI to complete using a Promise that resolves when onDone is called
+      await new Promise<void>((resolve, reject) => {
+        const originalOnDone = aiHandle.onDone;
+        const originalOnError = aiHandle.onError;
+        aiHandle.onDone = (finalText) => {
+          originalOnDone(finalText);
+          resolve();
+        };
+        aiHandle.onError = (e) => {
+          originalOnError(e);
+          reject(e);
+        };
       });
 
       // We return a dummy buffer to satisfy the machine contract, but playback is already ongoing via WS player.
@@ -350,9 +338,10 @@ export default function Home() {
   // Keep a ref to the current audio to allow interruption
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   // TTS analyser handled inside TtsWsPlayer
-  // TTS WS player and SSE abort controller for interruption
+  // TTS WS player, SSE abort controller, and AI abort controller for interruption
   const ttsPlayerRef = useRef<TtsWsPlayer | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);
+  const aiAbortRef = useRef<AbortController | null>(null);
   // Speaking state inferred for gating interruptions
   const ttsSpeakingRef = useRef<boolean>(false);
   // Fallback timer to force AUDIO_ENDED if onended doesn't arrive
@@ -619,33 +608,11 @@ export default function Home() {
 
   // removed old voiceDeps block (moved above to define `send` early)
 
-  // When machine enters playing with audioBuffer, play it and send AUDIO_ENDED on end
-  // NOTE: Deprecated path: REST TTS playback. With WS streaming we auto-play via TtsWsPlayer.
-  useEffect(() => {
-    const audioBuf = state.context.audioBuffer;
-    // Only start playback once when entering playing with a fresh buffer
-    if (state.value.control === "playing" && audioBuf && !currentAudioRef.current) {
-      const blob = new Blob([audioBuf], { type: "audio/mpeg" });
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      currentAudioRef.current = audio;
-      appendLog("Playing TTS audio…");
-      audio.addEventListener("ended", () => {
-        currentAudioRef.current = null;
-        send({ type: "AUDIO_ENDED" });
-      }, { once: true });
-      void audio.play();
-    }
-    // Cleanup if leaving playing while an audio instance exists
-    if (state.value.control !== "playing" && currentAudioRef.current) {
-      try { currentAudioRef.current.pause(); } catch {}
-      currentAudioRef.current = null;
-    }
-  }, [state, send, appendLog]);
+  // Deprecated REST TTS playback effect removed; WS TTS handles playback lifecycle
 
   return (
     <div className="min-h-dvh w-full">
-      <Visualizer logsRef={vizLogsRef} onHud={setHud} micMuted={isMicMuted} />
+      <Visualizer onHud={setHud} />
       <div className="fixed inset-x-0 z-50 bottom-12">
         <div className="flex items-center justify-center gap-8">
           <GlassButton
@@ -665,32 +632,6 @@ export default function Home() {
           >
             {state.value.control !== "ready" && state.value.control !== "error" ? <Square className="h-6 w-6" /> : <Speech className="h-6 w-6" />}
           </GlassButton>
-
-          {/* <GlassButton
-            aria-label={isMicMuted ? "Unmute mic" : "Mute mic"}
-            onClick={() => {
-              const next = !isMicMuted;
-              setIsMicMuted(next);
-              if (next) {
-                appendLog("Mic muted (VAD paused)");
-                try { vad.pause(); } catch {}
-                // Stop any ongoing capture immediately
-                try { stopRecording(); } catch {}
-              } else {
-                appendLog("Mic unmuted (VAD resumed)");
-                // Only resume VAD if we are in an active listening flow
-                if (state.value.control !== "ready" && state.value.control !== "error") {
-                  try { vad.start(); } catch {}
-                }
-              }
-            }}
-            diameter={64}
-            active={isMicMuted}
-            blurClassName="backdrop-blur-md"
-            size="sm"
-          >
-            {isMicMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-          </GlassButton> */}
         </div>
       </div>
       <div className="fixed top-4 right-4 z-50 flex gap-2">
