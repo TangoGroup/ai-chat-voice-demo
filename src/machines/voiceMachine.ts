@@ -1,4 +1,4 @@
-import { setup, assign, fromPromise, raise, type DoneActorEvent } from "xstate";
+import { setup, assign, fromPromise, type DoneActorEvent } from "xstate";
 
 // Visualizer voice state union reused across the app
 export type VoiceVisualState = "passive" | "listening" | "thinking" | "speaking";
@@ -23,8 +23,6 @@ export type VoiceEvents =
   | { type: "RECORDING_STOPPED"; blob: Blob }
   | { type: "AUDIO_ENDED" }
   | { type: "ERROR"; message: string }
-  | { type: "VAD_TURN_ON" }
-  | { type: "VAD_TURN_OFF" }
   | { type: "TTS_STARTED" }
   | { type: "TTS_ENDED" };
 
@@ -41,7 +39,6 @@ export interface ProcessOutput {
 export interface VoiceMachineDeps {
   onStartListening: () => void; // ensure mic stream + start VAD infra
   onStopAll: () => void; // stop playback, capture, VAD, optionally close mic
-  onVisualizerState: (state: VoiceVisualState) => void;
   processPipeline: (input: ProcessInput) => Promise<ProcessOutput>;
   log: (msg: string) => void;
   startCapture: () => void; // begin MediaRecorder for current utterance
@@ -68,16 +65,6 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       }),
     },
     actions: {
-      // VAD control events
-      turnVadOn: raise({ type: "VAD_TURN_ON" }),
-      turnVadOff: raise({ type: "VAD_TURN_OFF" }),
-
-      // Visualizer updates
-      vizPassive: () => d.onVisualizerState("passive"),
-      vizListening: () => d.onVisualizerState("listening"),
-      vizThinking: () => d.onVisualizerState("thinking"),
-      vizSpeaking: () => d.onVisualizerState("speaking"),
-
       // Lifecycle controls
       startListeningInfra: () => { d.log("machine: startListeningInfra"); d.onStartListening(); },
       stopAll: () => { d.log("machine: stopAll"); d.onStopAll(); },
@@ -114,10 +101,6 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       markSseDone: assign(() => ({ streamSseDone: true } as Partial<VoiceContext>)),
       markTtsDone: assign(() => ({ streamTtsDone: true } as Partial<VoiceContext>)),
       clearStreaming: assign(() => ({ isStreaming: false, streamSseDone: false, streamTtsDone: false } as Partial<VoiceContext>)),
-
-      // Logging
-      logVadOn: () => d.log("VAD ON"),
-      logVadOff: () => d.log("VAD OFF"),
     },
     guards: {
       hasAudioBuffer: (params) => {
@@ -136,7 +119,7 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
     },
   }).createMachine({
     id: "voice",
-    type: "parallel",
+    initial: "ready",
     context: {
       transcribedText: null,
       answerText: null,
@@ -148,11 +131,7 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       streamTtsDone: false,
     },
     states: {
-      control: {
-        initial: "ready",
-        states: {
           ready: {
-            entry: ["turnVadOff", "vizPassive"],
             on: {
               START_LISTENING: {
                 target: "listening_idle",
@@ -161,7 +140,7 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
           },
           listening_idle: {
             id: "control_listening_idle",
-            entry: ["turnVadOn", "vizListening", "startListeningInfra"],
+            entry: ["startListeningInfra"],
             on: {
               STOP_ALL: { target: "ready", actions: "stopAll" },
               // Ensure any residual playback (e.g., WS TTS) is stopped when user interrupts from idle
@@ -169,7 +148,6 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
           capturing: {
-            entry: ["vizListening"],
             initial: "recording",
             states: {
               recording: {
@@ -198,12 +176,11 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
           },
           processing: {
             id: "control_processing",
-            entry: ["vizThinking"],
             on: {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture"] },
-              TTS_STARTED: { actions: ["vizSpeaking", "markStreamingOn"] },
+              TTS_STARTED: { actions: "markStreamingOn" },
               TTS_ENDED: { actions: "markTtsDone" },
             },
             invoke: {
@@ -221,7 +198,6 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
           speaking_streaming: {
-            entry: ["vizSpeaking"],
             on: {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
@@ -231,7 +207,6 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
           playing: {
-            entry: ["vizSpeaking"],
             on: {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
@@ -243,7 +218,6 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
           error: {
-            entry: ["turnVadOff", "vizPassive"],
             on: {
               START_LISTENING: {
                 target: "listening_idle",
@@ -253,26 +227,7 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
         },
-      },
-      vad: {
-        initial: "off",
-        states: {
-          off: {
-            on: {
-              VAD_TURN_ON: "on",
-            },
-          },
-          on: {
-            entry: "logVadOn",
-            exit: "logVadOff",
-            on: {
-              VAD_TURN_OFF: "off",
-            },
-          },
-        },
-      },
-    },
-  });
+    });
 
   return logic;
 }

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createActor, type ActorRef, type SnapshotFrom, type EventFromLogic } from "xstate";
-import { createVoiceMachine, type VoiceContext, type VoiceEvents } from "@/machines/voiceMachine";
+import { useMemo } from "react";
+import { useMachine } from "@xstate/react";
+import { createVoiceMachine } from "@/machines/voiceMachine";
+import type { VoiceContext, VoiceEvents } from "@/machines/voiceMachine";
 
-export type ControlState = "ready" | "listening_idle" | "capturing" | "processing" | "playing" | "error";
+export type ControlState = "ready" | "listening_idle" | "capturing" | "processing" | "speaking_streaming" | "playing" | "error";
 export type VadState = "off" | "on";
 
 export interface VoiceSnapshot {
@@ -12,41 +13,17 @@ export interface VoiceSnapshot {
 
 export function useVoiceService(deps: Parameters<typeof createVoiceMachine>[0]) {
   const machine = useMemo(() => createVoiceMachine(deps), [deps]);
-  type Snap = SnapshotFrom<typeof machine>;
-  type Ev = EventFromLogic<typeof machine>;
-  const actorRef = useRef<ActorRef<Snap, Ev> | null>(null);
-  const initialContext: VoiceContext = {
-    transcribedText: null,
-    answerText: null,
-    audioBuffer: null,
-    error: null,
-    recordingBlob: null,
-    isStreaming: false,
-    streamSseDone: false,
-    streamTtsDone: false,
-  };
-  const [snapshot, setSnapshot] = useState<VoiceSnapshot>({ value: { control: "ready", vad: "off" }, context: initialContext });
 
-  useEffect(() => {
-    const actor = createActor(machine);
-    actorRef.current = actor as unknown as ActorRef<Snap, Ev>;
-    const sub = actor.subscribe((state) => {
-      setSnapshot({ value: state.value as { control: ControlState; vad: VadState }, context: state.context as VoiceContext });
-    });
-    actor.start();
-    return () => {
-      sub.unsubscribe();
-      actor.stop();
-      actorRef.current = null;
-    };
-  }, [machine]);
+  // Use XState's built-in useMachine hook
+  const [state, send] = useMachine(machine);
 
-  const send = (event: VoiceEvents) => {
-    const a = actorRef.current;
-    if (a) a.send(event);
+  // Transform XState snapshot to our expected format
+  const snapshot: VoiceSnapshot = {
+    value: state.value as { control: ControlState; vad: VadState },
+    context: state.context as VoiceContext
   };
 
-  return [snapshot, send] as const;
+  return [snapshot, send as (event: VoiceEvents) => void] as const;
 }
 
 

@@ -4,6 +4,7 @@
   - Accepts incremental text via sendText
   - Emits audio via MediaSource (MSE) for reliable streaming playback
   - Meters volume via Web Audio analyser (captureStream preferred; fallback to MediaElementSource)
+  - Uses shared AudioContext from React context to avoid conflicts
 */
 
 export interface TtsWsPlayerOptions {
@@ -17,6 +18,7 @@ export interface TtsWsPlayerOptions {
   // Configure buffering behavior for time-to-first-audio vs quality tradeoff
   chunkLengthSchedule?: number[]; // e.g., [120, 160, 250, 290]
   onLog?: (msg: string) => void;
+  onError?: (error: Error | string, context?: string) => void;
   onFirstAudio?: () => void;
   onFinal?: () => void;
   onVolume?: (v: number) => void;
@@ -24,6 +26,11 @@ export interface TtsWsPlayerOptions {
    * Fired when the underlying HTMLAudioElement finishes playback of all buffered audio.
    */
   onPlaybackEnded?: () => void;
+  /**
+   * Shared AudioContext to use for analysis. Should be provided via useTtsWsPlayer hook.
+   * If not provided, analyser creation will be skipped (metering won't work).
+   */
+  audioContext?: AudioContext;
 }
 
 export class TtsWsPlayer {
@@ -36,7 +43,8 @@ export class TtsWsPlayer {
   private isBufferUpdating = false;
   private audioEl: HTMLAudioElement;
   private objectUrl: string | null = null;
-  // WebAudio metering
+  // WebAudio metering - use shared context when available
+  private sharedAudioCtx: AudioContext | null = null;
   private audioCtx: AudioContext | null = null;
   private gainNode: GainNode | null = null;
   private analyserNode: AnalyserNode | null = null;
@@ -54,12 +62,45 @@ export class TtsWsPlayer {
   constructor(private readonly opts: TtsWsPlayerOptions) {
     this.audioEl = new Audio();
     this.audioEl.preload = "auto";
+    // Store shared AudioContext if provided by consumer (via hook wrapper)
+    this.sharedAudioCtx = this.opts.audioContext || null;
     // Reflect playback end to consumer for state transitions
-    this.audioEl.onended = () => { try { this.opts.onPlaybackEnded?.(); } catch {} };
+    this.audioEl.onended = () => {
+      try {
+        this.opts.onPlaybackEnded?.();
+      } catch (error) {
+        this.handleError(error, "audioEl.onended callback");
+      }
+    };
     // Diagnostics: log pause, error, and stalled conditions
-    this.audioEl.onpause = () => { try { this.opts.onLog?.("TTS WS: audioEl paused"); } catch {} };
-    this.audioEl.onerror = () => { try { this.opts.onLog?.("TTS WS: audioEl error"); } catch {} };
-    this.audioEl.onstalled = () => { try { this.opts.onLog?.("TTS WS: audioEl stalled"); } catch {} };
+    this.audioEl.onpause = () => {
+      try {
+        this.opts.onLog?.("TTS WS: audioEl paused");
+      } catch (error) {
+        this.handleError(error, "audioEl.onpause callback");
+      }
+    };
+    this.audioEl.onerror = () => {
+      try {
+        this.opts.onLog?.("TTS WS: audioEl error");
+      } catch (error) {
+        this.handleError(error, "audioEl.onerror callback");
+      }
+    };
+    this.audioEl.onstalled = () => {
+      try {
+        this.opts.onLog?.("TTS WS: audioEl stalled");
+      } catch (error) {
+        this.handleError(error, "audioEl.onstalled callback");
+      }
+    };
+  }
+
+  private handleError(error: unknown, context?: string): void {
+    const errorMsg = error instanceof Error ? error : String(error);
+    const errorObj = error instanceof Error ? error : new Error(String(error));
+    this.opts.onError?.(errorObj, context || "TtsWsPlayer");
+    this.opts.onLog?.(`TTS WS error${context ? ` [${context}]` : ""}: ${errorMsg}`);
   }
 
   async connect(): Promise<void> {
@@ -120,8 +161,12 @@ export class TtsWsPlayer {
       if (!document.body.contains(this.audioEl)) document.body.appendChild(this.audioEl);
       // Prime autoplay in Safari: start muted and call play() immediately; we'll unmute on first audio
       this.audioEl.muted = true;
-      void this.audioEl.play().catch(() => { /* muted autoplay should succeed */ });
-    } catch {}
+      void this.audioEl.play().catch((error) => {
+        this.handleError(error, "audioEl.play() initial muted autoplay");
+      });
+    } catch (error) {
+      this.handleError(error, "audioEl configuration");
+    }
     const sourceOpenPromise = this.useBlobFallback
       ? Promise.resolve()
       : new Promise<void>((resolve, reject) => {
@@ -191,13 +236,25 @@ export class TtsWsPlayer {
               if (!this.firstAudioResolved) {
                 this.firstAudioResolved = true;
                 // Initialize analyser for HUD volume
-                try { this.ensureAnalyserForAudioEl(); } catch {}
+                try {
+                  this.ensureAnalyserForAudioEl();
+                } catch (error) {
+                  this.handleError(error, "ensureAnalyserForAudioEl");
+                }
                 // Unmute now that audio has started; element is already playing muted
-                try { this.audioEl.muted = this.desiredMuted; } catch {}
+                try {
+                  this.audioEl.muted = this.desiredMuted;
+                } catch (error) {
+                  this.handleError(error, "audioEl.muted");
+                }
                 // Retry play in case autoplay was blocked
                 this.ensurePlaybackStarted();
                 if (onLog) onLog(`TTS WS: first audio chunk received; playback starting (${this.useBlobFallback ? "Blob" : "MSE"})`);
-                try { this.opts.onFirstAudio?.(); } catch {}
+                try {
+                  this.opts.onFirstAudio?.();
+                } catch (error) {
+                  this.handleError(error, "onFirstAudio callback");
+                }
               }
               // suppress per-chunk logs for noise reduction
             }
@@ -216,7 +273,11 @@ export class TtsWsPlayer {
                   if (onLog) onLog(`TTS WS: Blob fallback failed: ${(e as Error).message}`);
                 }
               }
-              try { this.opts.onFinal?.(); } catch {}
+              try {
+                this.opts.onFinal?.();
+              } catch (error) {
+                this.handleError(error, "onFinal callback");
+              }
             }
           } catch (e) {
             if (onLog) onLog(`TTS WS parse error: ${(e as Error).message}`);
@@ -235,7 +296,9 @@ export class TtsWsPlayer {
               this.retryStage += 1;
               if (onLog) onLog(`TTS WS: retrying with stage=${this.retryStage === 1 ? "MP3" : "Blob"}`);
               void this.connect();
-            } catch {}
+            } catch (error) {
+              this.handleError(error, "WebSocket retry");
+            }
           }
         };
       } catch (err) {
@@ -266,7 +329,11 @@ export class TtsWsPlayer {
   }
 
   close() {
-    try { this.ws?.close(); } catch {}
+    try {
+      this.ws?.close();
+    } catch (error) {
+      this.handleError(error, "WebSocket close");
+    }
     this.ws = null;
     this.endOfStream();
     this.teardownAudio("close");
@@ -277,8 +344,16 @@ export class TtsWsPlayer {
    * Immediately finalize playback and close the WS. Use when upstream SSE completes.
    */
   endSession() {
-    try { this.endOfStream(); } catch {}
-    try { this.ws?.close(1000, "client_end"); } catch {}
+    try {
+      this.endOfStream();
+    } catch (error) {
+      this.handleError(error, "endOfStream in endSession");
+    }
+    try {
+      this.ws?.close(1000, "client_end");
+    } catch (error) {
+      this.handleError(error, "WebSocket close in endSession");
+    }
   }
 
   private enqueue(bytes: ArrayBuffer) {
@@ -293,8 +368,9 @@ export class TtsWsPlayer {
     try {
       this.isBufferUpdating = true;
       this.sourceBuffer.appendBuffer(next);
-    } catch {
+    } catch (error) {
       this.isBufferUpdating = false;
+      this.handleError(error, "SourceBuffer.appendBuffer");
     }
   }
 
@@ -306,12 +382,14 @@ export class TtsWsPlayer {
         p.then(() => {
           if (onLog) onLog("TTS WS: audioEl.play() succeeded");
           this.removeAutoplayClickHandler();
-        }).catch(() => {
+        }).catch((error) => {
           if (onLog) onLog("TTS WS: audioEl.play() blocked; awaiting user gesture");
+          this.handleError(error, "audioEl.play() promise rejection");
           this.addAutoplayClickHandler();
         });
       }
-    } catch {
+    } catch (error) {
+      this.handleError(error, "audioEl.play()");
       this.addAutoplayClickHandler();
     }
   }
@@ -322,14 +400,26 @@ export class TtsWsPlayer {
     if (this.autoplayClickHandlerAdded) return;
     const { onLog } = this.opts;
     const onFirstClick = () => {
-      try { document.removeEventListener("click", onFirstClick, true); } catch {}
+      try {
+        document.removeEventListener("click", onFirstClick, true);
+      } catch (error) {
+        this.handleError(error, "removeEventListener in autoplay click handler");
+      }
       this.autoplayClickHandlerAdded = false;
-      try { void this.audioEl.play(); } catch {}
+      try {
+        void this.audioEl.play();
+      } catch (error) {
+        this.handleError(error, "audioEl.play() in autoplay click handler");
+      }
       if (onLog) onLog("TTS WS: retried audioEl.play() after user gesture");
     };
-    document.addEventListener("click", onFirstClick, true);
-    this.autoplayClickHandlerAdded = true;
-    if (onLog) onLog("TTS WS: installed one-time click handler for autoplay resume");
+    try {
+      document.addEventListener("click", onFirstClick, true);
+      this.autoplayClickHandlerAdded = true;
+      if (onLog) onLog("TTS WS: installed one-time click handler for autoplay resume");
+    } catch (error) {
+      this.handleError(error, "addEventListener for autoplay click handler");
+    }
   }
 
   private removeAutoplayClickHandler() {
@@ -340,16 +430,28 @@ export class TtsWsPlayer {
   private ensureAnalyserForAudioEl(): void {
     if (this.analyserNode) return;
     try {
-      const AC = (window as unknown as { webkitAudioContext?: typeof AudioContext; AudioContext?: typeof AudioContext }).AudioContext
-        || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AC) return;
-      const ctx = new AC();
-      void ctx.resume().catch(() => {});
+      // Require shared AudioContext - should always be provided via useTtsWsPlayer hook
+      const ctx = this.sharedAudioCtx;
+      if (!ctx) {
+        this.opts.onLog?.("TTS WS: Cannot create analyser - shared AudioContext not provided");
+        return;
+      }
+
+      this.opts.onLog?.(`TTS WS: Using shared AudioContext state=${ctx.state}`);
+
       // Diagnostics: log AudioContext state changes that could mute metering or playback
       try {
-        ctx.onstatechange = () => { try { this.opts.onLog?.(`TTS WS: AudioContext state=${ctx.state}`); } catch {} };
-        this.opts.onLog?.(`TTS WS: AudioContext created state=${ctx.state}`);
-      } catch {}
+        ctx.onstatechange = () => {
+          try {
+            this.opts.onLog?.(`TTS WS: AudioContext state=${ctx.state}`);
+          } catch (error) {
+            this.handleError(error, "onLog in AudioContext.onstatechange");
+          }
+        };
+      } catch (error) {
+        this.handleError(error, "Setting AudioContext.onstatechange");
+      }
+
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.85;
@@ -361,8 +463,8 @@ export class TtsWsPlayer {
       this.audioCtx = ctx;
       this.analyserNode = analyser;
       this.startRaf();
-    } catch {
-      // ignore
+    } catch (error) {
+      this.handleError(error, "ensureAnalyserForAudioEl");
     }
   }
 
@@ -371,7 +473,11 @@ export class TtsWsPlayer {
    */
   public setMuted(muted: boolean): void {
     this.desiredMuted = muted;
-    try { this.audioEl.muted = muted; } catch {}
+    try {
+      this.audioEl.muted = muted;
+    } catch (error) {
+      this.handleError(error, "audioEl.muted in setMuted");
+    }
   }
 
   private startRaf() {
@@ -388,59 +494,113 @@ export class TtsWsPlayer {
         }
         const rms = Math.sqrt(sum / data.length);
         const vol = Math.min(1, Math.max(0, rms * 2.8));
-        try { this.opts.onVolume?.(vol); } catch {}
-      } catch {}
+        try {
+          this.opts.onVolume?.(vol);
+        } catch (error) {
+          this.handleError(error, "onVolume callback");
+        }
+      } catch (error) {
+        this.handleError(error, "startRaf step");
+      }
       this.rafId = requestAnimationFrame(step);
     };
     this.rafId = requestAnimationFrame(step);
   }
 
   private endOfStream() {
-    if (this.rafId) { try { cancelAnimationFrame(this.rafId); } catch {} this.rafId = null; }
+    if (this.rafId) {
+      try {
+        cancelAnimationFrame(this.rafId);
+      } catch (error) {
+        this.handleError(error, "cancelAnimationFrame in endOfStream");
+      }
+      this.rafId = null;
+    }
     if (this.mediaSource && this.mediaSource.readyState === "open") {
-      try { this.mediaSource.endOfStream(); } catch {}
+      try {
+        this.mediaSource.endOfStream();
+      } catch (error) {
+        this.handleError(error, "mediaSource.endOfStream");
+      }
     }
   }
 
   private teardownAudio(_reason: string) {
     try {
-      if (this.rafId) { try { cancelAnimationFrame(this.rafId); } catch {} this.rafId = null; }
-      try { this.analyserNode?.disconnect(); } catch {}
+      if (this.rafId) {
+        try {
+          cancelAnimationFrame(this.rafId);
+        } catch (error) {
+          this.handleError(error, "cancelAnimationFrame in teardownAudio");
+        }
+        this.rafId = null;
+      }
+      try {
+        this.analyserNode?.disconnect();
+      } catch (error) {
+        this.handleError(error, "analyserNode.disconnect");
+      }
       this.analyserNode = null;
-      try { this.gainNode?.disconnect(); } catch {}
+      try {
+        this.gainNode?.disconnect();
+      } catch (error) {
+        this.handleError(error, "gainNode.disconnect");
+      }
       this.gainNode = null;
-      try { this.audioCtx?.close(); } catch {}
+      // Don't close AudioContext - it's shared and managed by AudioContextProvider
       this.audioCtx = null;
-    } catch {
-      // ignore
+    } catch (error) {
+      this.handleError(error, "teardownAudio");
     }
   }
 
   private teardownMedia(_reason: string) {
     try {
       if (this.sourceBuffer) {
-        try { this.sourceBuffer.abort(); } catch {}
+        try {
+          this.sourceBuffer.abort();
+        } catch (error) {
+          this.handleError(error, "sourceBuffer.abort");
+        }
       }
       this.sourceBuffer = null;
       this.chosenSourceBufferMime = null;
       this.pendingChunks = [];
       this.isBufferUpdating = false;
       if (this.mediaSource) {
-        try { if (this.mediaSource.readyState === "open") this.mediaSource.endOfStream(); } catch {}
+        try {
+          if (this.mediaSource.readyState === "open") {
+            this.mediaSource.endOfStream();
+          }
+        } catch (error) {
+          this.handleError(error, "mediaSource.endOfStream in teardownMedia");
+        }
       }
       this.mediaSource = null;
       if (this.objectUrl) {
-        try { URL.revokeObjectURL(this.objectUrl); } catch {}
+        try {
+          URL.revokeObjectURL(this.objectUrl);
+        } catch (error) {
+          this.handleError(error, "URL.revokeObjectURL");
+        }
       }
       this.objectUrl = null;
       // Reset audio element
-      try { this.audioEl.pause(); } catch {}
+      try {
+        this.audioEl.pause();
+      } catch (error) {
+        this.handleError(error, "audioEl.pause");
+      }
       this.audioEl.removeAttribute("src");
-      try { this.audioEl.load(); } catch {}
+      try {
+        this.audioEl.load();
+      } catch (error) {
+        this.handleError(error, "audioEl.load");
+      }
       this.useBlobFallback = false;
       this.fallbackChunks = [];
-    } catch {
-      // ignore
+    } catch (error) {
+      this.handleError(error, "teardownMedia");
     }
   }
 }

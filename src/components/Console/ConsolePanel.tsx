@@ -16,7 +16,7 @@ export interface ConsolePanelProps {
    * If true, hide the overlay. If false, keep overlay but clicking on it closes the sheet.
    */
   hideOverlay?: boolean;
-  hud?: { state: string; mic: number; tts: number; eff: number } | null;
+  hud?: { state: string; mic: number; tts: number; eff: number; isMicActive?: boolean; micError?: string } | null;
   /**
    * Optional callback to manually trigger TTS with entered text.
    */
@@ -32,11 +32,25 @@ const ConsolePanel = forwardRef<HTMLDivElement, ConsolePanelProps>(function Cons
   { title = "Voice Chat Console", logs, canRecord, isRecording, onClear, textareaRef, hideOverlay = true, hud = null, onSpeak, interactiveEnabled = false, onToggleInteractive },
   _ref
 ) {
+  const [requestingMic, setRequestingMic] = useState(false);
+
   useEffect(() => {
     if (textareaRef?.current) {
       textareaRef.current.scrollTop = textareaRef.current.scrollHeight;
     }
   }, [logs.length, textareaRef]);
+
+  const requestMicrophonePermission = async () => {
+    setRequestingMic(true);
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log('🎤 Microphone permission granted');
+    } catch (error) {
+      console.error('🎤 Microphone permission denied:', error);
+    } finally {
+      setRequestingMic(false);
+    }
+  };
 
   const [manualText, setManualText] = useState<string>("");
 
@@ -112,7 +126,25 @@ const ConsolePanel = forwardRef<HTMLDivElement, ConsolePanelProps>(function Cons
             <div className="px-4 pb-2">
               <div className="mb-2 flex items-center justify-between text-xs">
                 <span className="text-muted-foreground">HUD</span>
-                <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-foreground/80">{hud.state}</span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={requestMicrophonePermission}
+                    disabled={requestingMic}
+                    className="h-6 px-2 text-[10px]"
+                  >
+                    {requestingMic ? 'Requesting...' : '🎤 Allow Mic'}
+                  </Button>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
+                    hud.isMicActive ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                    hud.micError ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                    'bg-muted text-foreground/80'
+                  }`}>
+                    {hud.isMicActive ? '🎤 ON' : hud.micError ? '🎤 ERROR' : '🎤 OFF'}
+                  </span>
+                  <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-foreground/80">{hud.state}</span>
+                </div>
               </div>
               <div className="space-y-2">
                 <div>

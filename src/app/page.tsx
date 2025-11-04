@@ -1,22 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { speechFilter, preloadModel } from "@steelbrain/media-speech-detection-web";
-import { ingestAudioStream, RECOMMENDED_AUDIO_CONSTRAINTS } from "@steelbrain/media-ingest-audio";
 import { Square, Sun, Moon, Speech, SquarePen, Mic, MicOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Visualizer from "@/components/Visualizer/Visualizer";
 import { useTheme } from "@/components/Theme/ThemeProvider";
 import { createStopwatch, formatMs, getStoredChatId, setChatId, clearChatId } from "@/lib/utils";
-import { TtsWsPlayer } from "@/lib/ttsWs";
 import { streamSSE } from "@/lib/sse";
 import { useChat, type ChatMessage } from "@/lib/chat";
 import { OpenRouterAdapter } from "@/lib/aiAdapter";
 import { GlassButton } from "@/components/ui/glass-button";
 import { useQueryClient } from "@tanstack/react-query";
+import { useVoiceController, type ControlState } from "@/features/voice";
+import { useVAD, preloadVAD } from "@/features/voice/useVAD";
 import { type VoiceVisualState } from "@/machines/voiceMachine";
-import { useVoiceController } from "@/features/voice";
 import ConsolePanel from "@/components/Console/ConsolePanel";
+import { useTtsWsPlayer } from "@/lib/useTtsWsPlayer";
+import { TtsWsPlayer } from "@/lib/ttsWs";
 
 export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
@@ -31,18 +31,15 @@ export default function Home() {
   const queryClient = useQueryClient();
   // Chat history via React Query + localStorage (client-side context)
   const { messages, setMessages } = useChat(chatIdRef.current ?? "default", undefined);
-  const [hud, setHud] = useState<{ state: string; mic: number; tts: number; eff: number } | null>(null);
+  const messagesRef = useRef(messages);
+  const setMessagesRef = useRef(setMessages);
+  messagesRef.current = messages;
+  setMessagesRef.current = setMessages;
+  // TTS player hook - manages player lifecycle automatically
+  const ttsPlayer = useTtsWsPlayer();
 
   // Shared mic stream and machine sender
   const sharedStreamRef = useRef<MediaStream | null>(null);
-  const sendRef = useRef<((event: { type: string; [k: string]: unknown }) => void) | null>(null);
-  // VAD runtime flags
-  const vadEnabledRef = useRef<boolean>(false);
-  const vadPipelineStartedRef = useRef<boolean>(false);
-  // Interrupt policy and state refs for VAD gating
-  const interactiveEnabledRef = useRef<boolean>(false);
-  const isRecordingRef = useRef<boolean>(false);
-  const isListeningRef = useRef<boolean>(false);
 
   useEffect(() => {
     setCanRecord(typeof window !== "undefined" && "MediaRecorder" in window);
@@ -86,19 +83,8 @@ export default function Home() {
   const vizLogsRef = useRef<(msg: string) => void>(() => {});
   useEffect(() => { vizLogsRef.current = appendLog; }, [appendLog]);
 
-  // VAD model preload using library helper
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        await preloadModel();
-        if (!cancelled) appendLog("VAD model preloaded");
-      } catch (e) {
-        if (!cancelled) appendLog(`VAD preload failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [appendLog]);
+
+  // VAD model preload using VAD controller (moved after VAD controller declaration)
 
   const releaseSharedStream = useCallback(() => {
     if (sharedStreamRef.current) {
@@ -124,63 +110,114 @@ export default function Home() {
     appendLog("Stopping recording…");
   }, [appendLog]);
 
+  // Refs for VAD stream (will be set by useVAD hook)
+  const vadStreamRef = useRef<MediaStream | null>(null);
+
+  // startRecording moved here to be available for callbacks
+  const startRecording = useCallback(async () => {
+    const currentState = mediaRecorderRef.current?.state;
+    if (!canRecord || currentState === "recording" || currentState === "paused") return;
+    try {
+      appendLog(`Requesting microphone access… (recState=${currentState ?? "none"})`);
+      // Reuse VAD stream if available
+      const stream = vadStreamRef.current ?? await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!sharedStreamRef.current) {
+        sharedStreamRef.current = stream;
+      }
+      // Try explicit mimeType for broader compatibility
+      const preferredTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/ogg'
+      ];
+      let mediaRecorder: MediaRecorder | null = null;
+      for (const t of preferredTypes) {
+        const hasMediaRecorder = "MediaRecorder" in window;
+        type MediaRecorderStatic = typeof MediaRecorder & { isTypeSupported?: (mimeType: string) => boolean };
+        const MR = MediaRecorder as unknown as MediaRecorderStatic;
+        if (hasMediaRecorder && typeof MR.isTypeSupported === "function" && MR.isTypeSupported(t)) {
+          try { mediaRecorder = new MediaRecorder(stream, { mimeType: t }); appendLog(`MediaRecorder using ${t}`); break; } catch {}
+        }
+      }
+      if (!mediaRecorder) {
+        mediaRecorder = new MediaRecorder(stream);
+        appendLog("MediaRecorder using default type");
+      }
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+      mediaRecorder.ondataavailable = (event: BlobEvent) => { if (event.data && event.data.size > 0) audioChunksRef.current.push(event.data); };
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        appendLog(`MediaRecorder onstop: chunks=${audioChunksRef.current.length} size=${audioBlob.size}`);
+        if (audioBlob.size === 0) { appendLog("Recorded audio is empty. Skipping STT."); return; }
+        appendLog("Recorder stopped. Dispatching blob to machine…");
+        if (sendRef.current) sendRef.current({ type: "RECORDING_STOPPED", blob: audioBlob });
+      };
+      mediaRecorder.onerror = (e: unknown) => {
+        const possible = e as { error?: { message?: string } };
+        const msg = possible?.error?.message ?? String((possible as unknown as { error?: unknown })?.error ?? "Unknown MediaRecorder error");
+        appendLog(`MediaRecorder error: ${msg}`);
+      };
+      mediaRecorder.start();
+      setIsRecording(true);
+      appendLog(`Recording started. state=${mediaRecorder.state}`);
+      // VAD is managed at listening start; here we only capture
+    } catch (error) {
+      const err = error as Error;
+      appendLog(`Microphone access error: ${err.message}`);
+      console.error("Microphone access error", error);
+    }
+  }, [appendLog, canRecord]);
+
   // (removed) WebAudio context for TTS is managed inside TtsWsPlayer
   
 
-  // Machine wiring must be created before callbacks that reference `send`
-  const { snapshot: state, send } = useVoiceController(useMemo(() => ({
-    onStartListening: async () => {
-      if (!canRecord) return;
-      appendLog("Starting listening…");
-      try {
-        // Ensure mic is available and start VAD detection
-        await vad.start();
-        appendLog("VAD started");
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        appendLog(`VAD start error: ${msg}`);
-      }
-    },
-    onStopAll: () => {
-      // Stop playback, VAD, and capture
-      vad.pause();
-      stopRecording();
-      if (currentAudioRef.current) {
-        try { currentAudioRef.current.pause(); } catch {}
-        currentAudioRef.current = null;
-      }
-      ttsSpeakingRef.current = false;
-      // Interrupt any ongoing AI/TTS streaming
-      try { ttsAbortRef.current?.abort(); } catch {}
-      ttsAbortRef.current = null;
-      try { aiAbortRef.current?.abort(); } catch {}
-      aiAbortRef.current = null;
-      try { ttsPlayerRef.current?.close(); } catch {}
-      ttsPlayerRef.current = null;
-      if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
-      // TTS WebAudio is managed inside TtsWsPlayer; nothing to clean here beyond closing player
-    },
-    startCapture: () => { void startRecording(); },
-    stopCapture: () => { stopRecording(); },
-    stopPlayback: () => {
-      if (currentAudioRef.current) {
-        try { currentAudioRef.current.pause(); } catch {}
-        currentAudioRef.current = null;
-      }
-      ttsSpeakingRef.current = false;
-      // Also stop streaming TTS and upstream SSE to avoid overlap
-      try { ttsAbortRef.current?.abort(); } catch {}
-      ttsAbortRef.current = null;
-      try { ttsPlayerRef.current?.close(); } catch {}
-      ttsPlayerRef.current = null;
-      if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
-    },
-    onVisualizerState: (s: VoiceVisualState) => {
-      appendLog(`Visualizer -> ${s}`);
-      type VoiceStateEventDetail = { state?: VoiceVisualState; ttsVolume?: number };
-      window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { state: s } }));
-    },
-    processPipeline: async ({ blob }: { blob: Blob }) => {
+  // Refs for VAD and state management
+  const sendRef = useRef<((event: { type: string; [k: string]: unknown }) => void) | null>(null);
+  const interactiveEnabledRef = useRef<boolean>(false);
+  const isRecordingRef = useRef<boolean>(false);
+  const isListeningRef = useRef<boolean>(false);
+
+  // Wrap all callbacks in useCallback to stabilize references for useVoiceController
+  const onStartListening = useCallback(async () => {
+    if (!canRecord) return;
+    appendLog("Starting listening…");
+  }, [canRecord, appendLog]);
+
+  const onStopAll = useCallback(() => {
+    stopRecording();
+    if (currentAudioRef.current) {
+      try { currentAudioRef.current.pause(); } catch {}
+      currentAudioRef.current = null;
+    }
+    ttsSpeakingRef.current = false;
+    try { ttsAbortRef.current?.abort(); } catch {}
+    ttsAbortRef.current = null;
+    try { aiAbortRef.current?.abort(); } catch {}
+    aiAbortRef.current = null;
+    ttsPlayer.disconnect(); // Hook manages cleanup
+    ttsPlayerRef.current = null;
+    if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
+  }, [stopRecording, ttsPlayer]);
+
+  const startCapture = useCallback(() => { void startRecording(); }, [startRecording]);
+  const stopCapture = useCallback(() => { stopRecording(); }, [stopRecording]);
+
+  const stopPlayback = useCallback(() => {
+    if (currentAudioRef.current) {
+      try { currentAudioRef.current.pause(); } catch {}
+      currentAudioRef.current = null;
+    }
+    ttsSpeakingRef.current = false;
+    try { ttsAbortRef.current?.abort(); } catch {}
+    ttsAbortRef.current = null;
+    ttsPlayer.disconnect(); // Hook manages cleanup
+    ttsPlayerRef.current = null;
+    if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
+  }, [ttsPlayer]);
+
+  const processPipeline = useCallback(async ({ blob }: { blob: Blob }) => {
       const sw = createStopwatch();
       appendLog("Recording stopped. Transcribing with ElevenLabs…");
       const form = new FormData();
@@ -210,55 +247,55 @@ export default function Home() {
       // Clean up any previous streaming session before starting a new one
       try { ttsAbortRef.current?.abort(); } catch {}
       ttsAbortRef.current = null;
-      try { ttsPlayerRef.current?.close(); } catch {}
-      ttsPlayerRef.current = null;
+      ttsPlayer.disconnect(); // Hook manages cleanup
       try { aiAbortRef.current?.abort(); } catch {}
       aiAbortRef.current = null;
 
-      const player = new TtsWsPlayer({
-        apiKey,
-        voiceId,
-        modelId,
-        chunkLengthSchedule: [80, 120, 180, 240],
-        onLog: appendLogFiltered,
-        onVolume: (vol: number) => {
-          try {
-            type VoiceStateEventDetail = { state?: VoiceVisualState; ttsVolume?: number };
-            window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { ttsVolume: vol } }));
-          } catch {}
-        },
-        onFirstAudio: () => {
-          ttsSpeakingRef.current = true;
-          try { if (sendRef.current) sendRef.current({ type: "TTS_STARTED" }); } catch {}
-        },
-        onFinal: () => {
-          ttsSpeakingRef.current = false;
-          try { if (sendRef.current) sendRef.current({ type: "TTS_ENDED" }); } catch {}
-        },
-        onPlaybackEnded: () => {
-          appendLog("TTS playback ended -> AUDIO_ENDED");
-          try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
-        },
-      });
-
+      // Start TTS session via hook
+      const wsStartMs = sw.splitMs();
       try {
-        await player.connect();
+        await ttsPlayer.startSession(
+          {
+            apiKey,
+            voiceId,
+            modelId,
+            chunkLengthSchedule: [80, 120, 180, 240],
+          },
+          {
+            onLog: appendLogFiltered,
+            onVolume: (vol: number) => {
+              // TTS volume no longer needed for visualizer (using mic volume directly)
+            },
+            onFirstAudio: () => {
+              ttsSpeakingRef.current = true;
+              try { if (sendRef.current) sendRef.current({ type: "TTS_STARTED" }); } catch {}
+            },
+            onFinal: () => {
+              ttsSpeakingRef.current = false;
+              try { if (sendRef.current) sendRef.current({ type: "TTS_ENDED" }); } catch {}
+            },
+            onPlaybackEnded: () => {
+              appendLog("TTS playback ended -> AUDIO_ENDED");
+              try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
+            },
+          }
+        );
+        appendLog(`TTS WS connected (${formatMs(sw.splitMs() - wsStartMs)})`);
       } catch (e) {
         const errMsg = `TTS WS connect failed: ${(e as Error).message}`;
         appendLog(errMsg);
         throw e;
       }
-      const wsStartMs = sw.splitMs();
-      appendLog(`TTS WS connected (${formatMs(wsStartMs)})`);
 
       const ttsAborter = new AbortController();
       ttsAbortRef.current = ttsAborter;
-      ttsPlayerRef.current = player;
+      // Store player for abort controller coordination (hook manages lifecycle)
+      ttsPlayerRef.current = ttsPlayer.getPlayer();
 
       // Seed chat with user + placeholder assistant locally
-      const seedBase: ReadonlyArray<ChatMessage> = messages.length === 0 ? [{ role: "system", content: "" }] : [];
-      let currentMsgs: ChatMessage[] = [...seedBase, ...messages, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
-      try { setMessages(currentMsgs); } catch {}
+      const seedBase: ReadonlyArray<ChatMessage> = messagesRef.current.length === 0 ? [{ role: "system", content: "" }] : [];
+      let currentMsgs: ChatMessage[] = [...seedBase, ...messagesRef.current, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
+      try { setMessagesRef.current(currentMsgs); } catch {}
       appendLog(`AI request → messages=${currentMsgs.length - 1}`);
 
       const aiAborter = new AbortController();
@@ -269,8 +306,8 @@ export default function Home() {
       const aiHandle = aiAdapter.start({
         model: process.env.LLM_MODEL || "openai/gpt-4o",
         messages: (() => {
-          const base: ReadonlyArray<ChatMessage> = messages.length === 0 ? [{ role: "system", content: "" }] : [];
-          const withUser: ChatMessage[] = [...base, ...messages, { role: "user", content: transcribedText }];
+          const base: ReadonlyArray<ChatMessage> = messagesRef.current.length === 0 ? [{ role: "system", content: "" }] : [];
+          const withUser: ChatMessage[] = [...base, ...messagesRef.current, { role: "user", content: transcribedText }];
           return withUser.slice(-24);
         })(),
         signal: aiAborter.signal,
@@ -281,7 +318,7 @@ export default function Home() {
         if (token.length > 0) {
           assembledText += token;
           const shouldFlush = /[\.!?\n]$/.test(token) || token.length >= 40;
-          player.sendText(token, { flush: shouldFlush });
+          ttsPlayer.sendText(token, { flush: shouldFlush });
           // Update assistant message incrementally
           try {
             const next = currentMsgs.slice();
@@ -289,14 +326,14 @@ export default function Home() {
             if (last && last.role === "assistant") {
               next[next.length - 1] = { role: "assistant", content: (last.content || "") + token };
               currentMsgs = next;
-              setMessages(next);
+              setMessagesRef.current(next);
             }
           } catch {}
         }
       });
 
       aiHandle.onDone(() => {
-        player.flush();
+        ttsPlayer.flush();
         appendLog(`AI done; flushed TTS buffer chatId=${chatIdRef.current ?? "none"}`);
         if (assembledText.trim().length > 0) {
           appendLog(`AI final: "${assembledText}"`);
@@ -322,17 +359,79 @@ export default function Home() {
         };
       });
 
-      // We return a dummy buffer to satisfy the machine contract, but playback is already ongoing via WS player.
-      return { transcribedText, answerText: assembledText, audioBuffer: new ArrayBuffer(0) };
+    // We return a dummy buffer to satisfy the machine contract, but playback is already ongoing via WS player.
+    return { transcribedText, answerText: assembledText, audioBuffer: new ArrayBuffer(0) };
+  }, [appendLog, appendLogFiltered, ttsPlayer]);
+
+  const log = useCallback((msg: string) => { appendLog(msg); }, [appendLog]);
+
+  const { snapshot: state, send } = useVoiceController({
+    onStartListening,
+    onStopAll,
+    startCapture,
+    stopCapture,
+    stopPlayback,
+    processPipeline,
+    log,
+  });
+
+  // VAD hook - enabled when in listening state, disabled otherwise
+  const vadEnabled = state.value === "listening_idle" || state.value === "capturing";
+  const { stream: vadStream, error: vadError } = useVAD(vadEnabled, {
+    onSpeechStart: () => {
+      if (interactiveEnabledRef.current) {
+        appendLog("VAD: speech detected (interactive preempt)");
+        send({ type: "VAD_SPEECH_START" });
+        return;
+      }
+      if (!isListeningRef.current) {
+        appendLog("VAD: speech detected (ignored; not in listening mode)");
+        return;
+      }
+      appendLog("VAD: speech detected (start)");
+      send({ type: "VAD_SPEECH_START" });
+    },
+    onSpeechEnd: () => {
+      if (!isRecordingRef.current) {
+        appendLog("VAD: speech ended (ignored; not recording)");
+        return;
+      }
+      appendLog("VAD: speech ended (end)");
+      send({ type: "VAD_SILENCE_TIMEOUT" });
+    },
+    onError: (error: string) => {
+      appendLog(`VAD error: ${error}`);
     },
     log: appendLog,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [appendLog, canRecord]));
+  });
+
+  // Update vadStreamRef when vadStream changes
+  useEffect(() => {
+    vadStreamRef.current = vadStream ?? null;
+  }, [vadStream]);
+
+  // Preload VAD model on mount
+  useEffect(() => {
+    preloadVAD().then(() => appendLog("VAD model preloaded"));
+  }, [appendLog]);
+
+  // Helper function to compute visual state from machine state (defined after voice controller)
+  const getVisualState = useCallback((controlState: string): VoiceVisualState => {
+    if (controlState === "ready" || controlState === "error") return "passive";
+    if (controlState === "listening_idle" || controlState === "capturing") return "listening";
+    if (controlState === "processing") return "thinking";
+    if (controlState === "speaking_streaming" || controlState === "playing") return "speaking";
+    return "passive";
+  }, []);
+
+  // Compute visual state from machine state
+  const visualState = getVisualState(state.value);
+
   // Keep send in a ref to avoid re-render feedback loops inside raf callbacks
   useEffect(() => { sendRef.current = send as unknown as (e: { type: string }) => void; }, [send]);
   // Track latest recording, listening state, and interactive toggle for VAD gating
   useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
-  useEffect(() => { isListeningRef.current = (state.value.control === "listening_idle" || state.value.control === "capturing"); }, [state.value.control]);
+  useEffect(() => { isListeningRef.current = (state.value === "listening_idle" || state.value === "capturing"); }, [state.value]);
   useEffect(() => { interactiveEnabledRef.current = interactiveEnabled; }, [interactiveEnabled]);
 
   // Keep a ref to the current audio to allow interruption
@@ -364,50 +463,52 @@ export default function Home() {
     // Clean up any previous streaming session before starting a new one
     try { ttsAbortRef.current?.abort(); } catch {}
     ttsAbortRef.current = null;
-    try { ttsPlayerRef.current?.close(); } catch {}
-    ttsPlayerRef.current = null;
+    ttsPlayer.disconnect(); // Hook manages cleanup
 
-    const player = new TtsWsPlayer({
-      apiKey,
-      voiceId,
-      modelId,
-      chunkLengthSchedule: [80, 120, 180, 240],
-      onLog: appendLogFiltered,
-      onVolume: (vol: number) => {
-        try {
-          type VoiceStateEventDetail = { state?: import("@/machines/voiceMachine").VoiceVisualState; ttsVolume?: number };
-          window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { ttsVolume: vol } }));
-        } catch {}
-      },
-      onFirstAudio: () => { ttsSpeakingRef.current = true; try { sendRef.current?.({ type: "TTS_STARTED" }); } catch {} },
-      onFinal: () => {
-        ttsSpeakingRef.current = false; try { sendRef.current?.({ type: "TTS_ENDED" }); } catch {}
-        // Fallback disabled: rely solely on onPlaybackEnded from the audio element
-      },
-      onPlaybackEnded: () => {
-        appendLog("TTS playback ended -> AUDIO_ENDED");
-        try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
-      },
-    });
-
+    // Start TTS session via hook
     try {
-      await player.connect();
+      await ttsPlayer.startSession(
+        {
+          apiKey,
+          voiceId,
+          modelId,
+          chunkLengthSchedule: [80, 120, 180, 240],
+        },
+        {
+          onLog: appendLogFiltered,
+          onVolume: (vol: number) => {
+            try {
+              type VoiceStateEventDetail = { state?: import("@/machines/voiceMachine").VoiceVisualState; ttsVolume?: number };
+              window.dispatchEvent(new CustomEvent<VoiceStateEventDetail>("voice-state", { detail: { ttsVolume: vol } }));
+            } catch {}
+          },
+          onFirstAudio: () => { ttsSpeakingRef.current = true; try { sendRef.current?.({ type: "TTS_STARTED" }); } catch {} },
+          onFinal: () => {
+            ttsSpeakingRef.current = false; try { sendRef.current?.({ type: "TTS_ENDED" }); } catch {}
+            // Fallback disabled: rely solely on onPlaybackEnded from the audio element
+          },
+          onPlaybackEnded: () => {
+            appendLog("TTS playback ended -> AUDIO_ENDED");
+            try { sendRef.current?.({ type: "AUDIO_ENDED" }); } catch {}
+          },
+        }
+      );
+      appendLog("Manual SSE: TTS WS connected");
     } catch (e) {
       const errMsg = `TTS WS connect failed: ${(e as Error).message}`;
       appendLog(errMsg);
       return;
     }
-    appendLog("Manual SSE: TTS WS connected");
 
     const aborter = new AbortController();
     ttsAbortRef.current = aborter;
-    ttsPlayerRef.current = player;
+    ttsPlayerRef.current = ttsPlayer.getPlayer();
     let assembledText = "";
 
     // Seed chat: add user message and placeholder assistant
-    const seedBase = messages.length === 0 ? [{ role: "system", content: "" } as const] : [];
-    let currentMsgs: ChatMessage[] = [...seedBase, ...messages, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
-    try { setMessages(currentMsgs); } catch {}
+    const seedBase = messagesRef.current.length === 0 ? [{ role: "system", content: "" } as const] : [];
+    let currentMsgs: ChatMessage[] = [...seedBase, ...messagesRef.current, { role: "user", content: transcribedText }, { role: "assistant", content: "" }];
+    try { setMessagesRef.current(currentMsgs); } catch {}
 
     await streamSSE("/api/generateAnswerStreamOpenRouter", {
       method: "POST",
@@ -416,8 +517,8 @@ export default function Home() {
         stream: true,
         ...(chatIdRef.current ? { chatId: chatIdRef.current } : {}),
         messages: (() => {
-          const base: ReadonlyArray<ChatMessage> = messages.length === 0 ? [{ role: "system", content: "" }] : [];
-          const withUser: ChatMessage[] = [...base, ...messages, { role: "user", content: transcribedText }];
+          const base: ReadonlyArray<ChatMessage> = messagesRef.current.length === 0 ? [{ role: "system", content: "" }] : [];
+          const withUser: ChatMessage[] = [...base, ...messagesRef.current, { role: "user", content: transcribedText }];
           return withUser.slice(-24);
         })(),
       }),
@@ -449,7 +550,7 @@ export default function Home() {
         if (typeof token === "string" && token.length > 0) {
           assembledText += token;
           const shouldFlush = /[\.!?\n]$/.test(token) || token.length >= 40;
-          player.sendText(token, { flush: shouldFlush });
+          ttsPlayer.sendText(token, { flush: shouldFlush });
           // Update assistant message incrementally
           try {
             const next = currentMsgs.slice();
@@ -457,14 +558,14 @@ export default function Home() {
             if (last && last.role === "assistant") {
               next[next.length - 1] = { role: "assistant", content: (last.content || "") + token };
               currentMsgs = next;
-              setMessages(next);
+              setMessagesRef.current(next);
             }
           } catch {}
         }
       },
       onError: (e) => { appendLog(`Manual AI SSE error: ${String(e)} chatId=${chatIdRef.current ?? "none"}`); },
       onDone: () => {
-        player.flush();
+        ttsPlayer.flush();
         appendLog(`Manual AI SSE done; flushed TTS buffer chatId=${chatIdRef.current ?? "none"}`);
         if (assembledText.trim().length > 0) {
           appendLog(`AI final: "${assembledText}"`);
@@ -472,137 +573,7 @@ export default function Home() {
         if (ttsAbortRef.current === aborter) ttsAbortRef.current = null;
       },
     });
-  }, [appendLog, messages, setMessages]);
-
-  // Steelbrain VAD controller (single pipeline, toggle via enabled flag)
-  const vadAbortRef = useRef<AbortController | null>(null);
-  const vad = useMemo(() => ({
-    start: async () => {
-      // Ensure mic stream
-      const stream = sharedStreamRef.current ?? await navigator.mediaDevices.getUserMedia({ audio: RECOMMENDED_AUDIO_CONSTRAINTS, video: false });
-      if (!sharedStreamRef.current) sharedStreamRef.current = stream;
-      try { stream.getAudioTracks().forEach((t) => { t.enabled = true; }); } catch {}
-
-      if (!vadPipelineStartedRef.current) {
-        // Build ingest and VAD pipeline once
-        const audioStream = await ingestAudioStream(stream);
-        const aborter = new AbortController();
-        vadAbortRef.current = aborter;
-        const vadTransform = speechFilter({
-          threshold: 0.45,
-          minSpeechDurationMs: 400,
-          redemptionDurationMs: 1400,
-          lookBackDurationMs: 384,
-          noEmit: true,
-          onSpeechStart: () => {
-            if (!vadEnabledRef.current) return;
-            if (interactiveEnabledRef.current) {
-              appendLog("VAD: speech detected (interactive preempt)");
-              try { sendRef.current?.({ type: "VAD_SPEECH_START" }); } catch {}
-              return;
-            }
-            if (!isListeningRef.current) { appendLog("VAD: speech detected (ignored; not in listening mode)"); return; }
-            appendLog("VAD: speech detected (start)");
-            try { sendRef.current?.({ type: "VAD_SPEECH_START" }); } catch {}
-          },
-          onSpeechEnd: () => {
-            if (!vadEnabledRef.current) return;
-            if (!isRecordingRef.current) {
-              appendLog("VAD: speech ended (ignored; not recording)");
-              return;
-            }
-            appendLog("VAD: speech ended (end)");
-            try { sendRef.current?.({ type: "VAD_SILENCE_TIMEOUT" }); } catch {}
-          },
-          onMisfire: () => { if (vadEnabledRef.current) appendLog("VAD: misfire (too short)"); },
-          onError: (err: unknown) => { if (vadEnabledRef.current) appendLog(`VAD error: ${err instanceof Error ? err.message : String(err)}`); },
-        });
-        void audioStream
-          .pipeThrough(vadTransform)
-          .pipeTo(new WritableStream<Float32Array>({ write() {} }), { signal: aborter.signal })
-          .catch(() => { /* aborted or errored */ });
-        vadPipelineStartedRef.current = true;
-      }
-      // Enable event emission
-      vadEnabledRef.current = true;
-    },
-    pause: () => {
-      vadEnabledRef.current = false; // disable callbacks
-      const s = sharedStreamRef.current;
-      if (s) {
-        try { s.getAudioTracks().forEach((t) => { t.enabled = false; }); } catch {}
-      }
-    },
-  }), [appendLog]);
-
-  // Cleanup on unmount: tear down pipeline and release mic
-  useEffect(() => {
-    return () => {
-      const a = vadAbortRef.current;
-      if (a) {
-        try { a.abort(); } catch {}
-        vadAbortRef.current = null;
-      }
-      vadPipelineStartedRef.current = false;
-      vadEnabledRef.current = false;
-      releaseSharedStream();
-    };
-  }, [releaseSharedStream]);
-
-  const startRecording = useCallback(async () => {
-    const currentState = mediaRecorderRef.current?.state;
-    if (!canRecord || currentState === "recording" || currentState === "paused") return;
-    try {
-      appendLog(`Requesting microphone access… (recState=${currentState ?? "none"}, isRecording=${isRecording})`);
-      // Ensure VAD is running and reuse the same stream instance
-      try { await vad.start(); } catch {}
-      const stream = sharedStreamRef.current ?? await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (!sharedStreamRef.current) sharedStreamRef.current = stream;
-      // Try explicit mimeType for broader compatibility
-      const preferredTypes = [
-        'audio/webm;codecs=opus',
-        'audio/webm',
-        'audio/ogg;codecs=opus',
-        'audio/ogg'
-      ];
-      let mediaRecorder: MediaRecorder | null = null;
-      for (const t of preferredTypes) {
-        const hasMediaRecorder = "MediaRecorder" in window;
-        type MediaRecorderStatic = typeof MediaRecorder & { isTypeSupported?: (mimeType: string) => boolean };
-        const MR = MediaRecorder as unknown as MediaRecorderStatic;
-        if (hasMediaRecorder && typeof MR.isTypeSupported === "function" && MR.isTypeSupported(t)) {
-          try { mediaRecorder = new MediaRecorder(stream, { mimeType: t }); appendLog(`MediaRecorder using ${t}`); break; } catch {}
-        }
-      }
-      if (!mediaRecorder) {
-        mediaRecorder = new MediaRecorder(stream);
-        appendLog("MediaRecorder using default type");
-      }
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-      mediaRecorder.ondataavailable = (event: BlobEvent) => { if (event.data && event.data.size > 0) audioChunksRef.current.push(event.data); };
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        appendLog(`MediaRecorder onstop: chunks=${audioChunksRef.current.length} size=${audioBlob.size}`);
-        if (audioBlob.size === 0) { appendLog("Recorded audio is empty. Skipping STT."); return; }
-        appendLog("Recorder stopped. Dispatching blob to machine…");
-        send({ type: "RECORDING_STOPPED", blob: audioBlob });
-      };
-      mediaRecorder.onerror = (e: unknown) => {
-        const possible = e as { error?: { message?: string } };
-        const msg = possible?.error?.message ?? String((possible as unknown as { error?: unknown })?.error ?? "Unknown MediaRecorder error");
-        appendLog(`MediaRecorder error: ${msg}`);
-      };
-      mediaRecorder.start();
-      setIsRecording(true);
-      appendLog(`Recording started. state=${mediaRecorder.state}`);
-      // VAD is managed at listening start; here we only capture
-    } catch (error) {
-      const err = error as Error;
-      appendLog(`Microphone access error: ${err.message}`);
-      console.error("Microphone access error", error);
-    }
-  }, [appendLog, canRecord, isRecording, send, vad]);
+  }, [appendLog, ttsPlayer]);
 
   
 
@@ -612,14 +583,14 @@ export default function Home() {
 
   return (
     <div className="min-h-dvh w-full">
-      <Visualizer onHud={setHud} />
+      <Visualizer voiceState={visualState} inputStream={vadStream || undefined} />
       <div className="fixed inset-x-0 z-50 bottom-12">
         <div className="flex items-center justify-center gap-8">
           <GlassButton
-            aria-label={state.value.control === "ready" ? "Start listening" : "Stop"}
+            aria-label={state.value === "ready" ? "Start listening" : "Stop"}
             onClick={() => {
-              appendLog(`Button click: control=${state.value.control}`);
-              if (state.value.control === "ready") {
+              appendLog(`Button click: control=${state.value}`);
+              if (state.value === "ready") {
                 appendLog("Dispatch START_LISTENING");
                 send({ type: "START_LISTENING" });
               } else {
@@ -628,9 +599,9 @@ export default function Home() {
               }
             }}
             diameter={112}
-            active={state.value.control !== "ready" && state.value.control !== "error"}
+            active={state.value !== "ready" && state.value !== "error"}
           >
-            {state.value.control !== "ready" && state.value.control !== "error" ? <Square className="h-6 w-6" /> : <Speech className="h-6 w-6" />}
+            {state.value !== "ready" && state.value !== "error" ? <Square className="h-6 w-6" /> : <Speech className="h-6 w-6" />}
           </GlassButton>
         </div>
       </div>
@@ -668,7 +639,6 @@ export default function Home() {
         isRecording={isRecording}
         onClear={clearLogs}
         textareaRef={consoleRef}
-        hud={hud}
         hideOverlay
         onSpeak={manualSpeak}
         interactiveEnabled={interactiveEnabled}

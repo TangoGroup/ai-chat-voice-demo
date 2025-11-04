@@ -278,3 +278,15 @@ VAD is `on` for all control states except `ready` and `error`.
 - Utilities in `src/lib/utils.ts`: `getStoredChatId`, `setChatId`, `clearChatId` (legacy generators retained but unused).
 - API behavior (2025-10-06): `/api/generateAnswerStream` forwards `chat_id` when provided; responses (SSE start or REST JSON) may include `chat_id` which the client stores for subsequent requests. The client includes `chatId` on all AI requests when available (including REST failover).
 
+### Shared AudioContext (2025-10-12)
+
+- Introduced `AudioContextProvider` component (`src/components/AudioContext`) to manage a single AudioContext instance across the app.
+- Rationale: Avoid re-render bugs and conflicts when multiple components (mic analyzer, TTS player) create separate AudioContext instances.
+- Implementation:
+  - Provider wraps the app in `layout.tsx` and exposes a ref via `useAudioContext()` hook.
+  - `useMicAnalyzer` uses the hook directly to access shared context.
+  - `TtsWsPlayer` uses a global getter pattern to access shared context without prop drilling.
+  - Global getter registered via `setSharedAudioContextGetter()` called from provider's useEffect.
+  - Only cleanup nodes/graph; never close the shared context (provider manages lifecycle).
+- Benefits: Consistent audio routing, no state conflicts, better resource management, no prop drilling.
+

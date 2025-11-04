@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAudioContext } from "@/components/AudioContext";
 
 export interface MicAnalyzerOptions {
   smoothingTimeConstant?: number;
@@ -18,12 +19,12 @@ export interface MicAnalyzer {
 
 export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
   const { smoothingTimeConstant = 0.8, fftSize = 1024, muted = false, inputStream } = options;
+  const { audioContextRef, initialize, resume } = useAudioContext();
 
   const [volume, setVolume] = useState<number>(0);
   const [isActive, setIsActive] = useState<boolean>(false);
   const [error, setError] = useState<string | undefined>(undefined);
 
-  const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | MediaElementAudioSourceNode | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -43,10 +44,6 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
       try { analyserRef.current.disconnect(); } catch {}
       analyserRef.current = null;
     }
-    if (audioContextRef.current) {
-      try { audioContextRef.current.close(); } catch {}
-      audioContextRef.current = null;
-    }
     if (streamRef.current) {
       try { streamRef.current.getTracks().forEach((t) => t.stop()); } catch {}
       streamRef.current = null;
@@ -55,9 +52,13 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
   }, []);
 
   const lastVolumeRef = useRef<number>(0);
+  const lastUpdateTimeRef = useRef<number>(0);
   const tick = useCallback(() => {
     const analyser = analyserRef.current;
-    if (!analyser) return;
+    if (!analyser) {
+      rafRef.current = null;
+      return;
+    }
     const bufferLength = analyser.fftSize;
     const timeDomainData = new Uint8Array(bufferLength);
     analyser.getByteTimeDomainData(timeDomainData);
@@ -71,18 +72,33 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
     const alpha = 0.35;
     const smoothed = lastVolumeRef.current * (1 - alpha) + normalized * alpha;
     lastVolumeRef.current = smoothed;
-    setVolume(smoothed);
-    rafRef.current = requestAnimationFrame(tick);
-  }, []);
-
-  const getAudioContextCtor = useCallback((): (typeof AudioContext) | null => {
-    const w = window as unknown as { webkitAudioContext?: typeof AudioContext; AudioContext?: typeof AudioContext };
-    return w.AudioContext ?? w.webkitAudioContext ?? null;
+    
+    // Throttle state updates to ~30fps to reduce re-render frequency
+    const now = Date.now();
+    if (now - lastUpdateTimeRef.current >= 33) { // ~30fps
+      lastUpdateTimeRef.current = now;
+      setVolume(smoothed);
+    }
+    
+    // Only schedule next frame if analyser still exists (cleanup sets it to null)
+    if (analyserRef.current) {
+      rafRef.current = requestAnimationFrame(tick);
+    } else {
+      rafRef.current = null;
+    }
   }, []);
 
   const start = useCallback(async () => {
     try {
-      if (isActive) return;
+      if (isActive || rafRef.current !== null) return; // Prevent multiple starts
+
+      await resume();
+
+      const audioContext = audioContextRef.current;
+      if (!audioContext) {
+        throw new Error("AudioContext not available");
+      }
+
       let stream: MediaStream;
       if (inputStream) {
         stream = inputStream;
@@ -93,10 +109,7 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
         streamRef.current = stream;
         ownsStreamRef.current = true;
       }
-      const AC = getAudioContextCtor();
-      if (!AC) throw new Error("AudioContext not supported");
-      const audioContext = new AC();
-      audioContextRef.current = audioContext;
+
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = fftSize;
       analyser.smoothingTimeConstant = smoothingTimeConstant;
@@ -110,13 +123,16 @@ export function useMicAnalyzer(options: MicAnalyzerOptions = {}): MicAnalyzer {
       }
       setIsActive(true);
       setError(undefined);
-      rafRef.current = requestAnimationFrame(tick);
+      // Only start animation frame loop if not already running
+      if (rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : "Unknown microphone error";
       setError(message);
       cleanup();
     }
-  }, [cleanup, fftSize, inputStream, isActive, smoothingTimeConstant, tick, muted]);
+  }, [cleanup, fftSize, inputStream, isActive, smoothingTimeConstant, tick, muted, audioContextRef, initialize, resume]);
 
   // Removed attachAudioElement (unused)
 
