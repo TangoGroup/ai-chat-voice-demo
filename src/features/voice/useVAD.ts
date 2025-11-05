@@ -56,11 +56,13 @@ export function useVAD(
 ): VADResult {
   const implementation = getVADImplementation();
   
-  if (implementation === "vad-react") {
-    return useVADReact(enabled, callbacks, options);
-  }
+  // Call both hooks unconditionally to satisfy React rules
+  // Only enable the one matching the implementation
+  const reactResult = useVADReact(implementation === "vad-react" && enabled, callbacks, options);
+  const steelbrainResult = useVADSteelbrain(implementation === "steelbrain" && enabled, callbacks, options);
   
-  return useVADSteelbrain(enabled, callbacks, options);
+  // Return the result from the active implementation
+  return implementation === "vad-react" ? reactResult : steelbrainResult;
 }
 
 /**

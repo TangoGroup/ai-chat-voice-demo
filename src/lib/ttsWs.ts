@@ -516,6 +516,10 @@ export class TtsWsPlayer {
     this.aiFinalReceived = true;
   }
 
+  public isConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
 
   private startRaf() {
     const an = this.analyserNode;

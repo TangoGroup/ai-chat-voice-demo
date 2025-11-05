@@ -153,9 +153,7 @@ export function useTtsWsPlayer(): TtsWsPlayerControls {
 
   const isConnected = useCallback((): boolean => {
     if (!playerRef.current) return false;
-    // Check if WebSocket is connected (access private field)
-    const ws = (playerRef.current as any).ws;
-    return ws !== null && ws.readyState === WebSocket.OPEN;
+    return playerRef.current.isConnected();
   }, []);
 
   const getPlayer = useCallback((): TtsWsPlayer | null => {
