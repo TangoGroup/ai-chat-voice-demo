@@ -58,6 +58,10 @@ export class TtsWsPlayer {
   private retryStage = 0; // 0=try MP4, 1=try MP3, 2=Blob fallback
   // Session control
   private lastChunkAtMs: number | null = null;
+  private playbackEndedFired = false;
+  private playbackEndTimeoutId: number | null = null;
+  private aiFinalReceived = false;
+  private stallAfterAiFinalHandled = false;
 
   constructor(private readonly opts: TtsWsPlayerOptions) {
     this.audioEl = new Audio();
@@ -67,6 +71,23 @@ export class TtsWsPlayer {
     // Reflect playback end to consumer for state transitions
     this.audioEl.onended = () => {
       try {
+        // Only ignore if we already fired and AI final wasn't received (prevents duplicate early fires)
+        // If AI final was received, allow the real end to fire even if we fired early
+        if (this.playbackEndedFired && !this.aiFinalReceived) {
+          this.opts.onLog?.("TTS WS: audioEl.onended fired (already handled, ignoring)");
+          return;
+        }
+        // If we fired early but AI final is now received, reset and allow real end
+        if (this.playbackEndedFired && this.aiFinalReceived) {
+          this.opts.onLog?.("TTS WS: audioEl.onended fired again after early trigger - treating as real end");
+          this.playbackEndedFired = false; // Reset to allow this real end to fire
+        }
+        this.playbackEndedFired = true;
+        if (this.playbackEndTimeoutId !== null) {
+          clearTimeout(this.playbackEndTimeoutId);
+          this.playbackEndTimeoutId = null;
+        }
+        this.opts.onLog?.("TTS WS: audioEl.onended fired");
         this.opts.onPlaybackEnded?.();
       } catch (error) {
         this.handleError(error, "audioEl.onended callback");
@@ -90,6 +111,8 @@ export class TtsWsPlayer {
     this.audioEl.onstalled = () => {
       try {
         this.opts.onLog?.("TTS WS: audioEl stalled");
+        // Check if stream has ended and we're near the end of playback
+        this.checkPlaybackCompletion();
       } catch (error) {
         this.handleError(error, "audioEl.onstalled callback");
       }
@@ -124,6 +147,13 @@ export class TtsWsPlayer {
     this.fallbackChunks = [];
     this.chosenSourceBufferMime = null;
     this.lastChunkAtMs = null;
+    this.playbackEndedFired = false;
+    this.aiFinalReceived = false;
+    this.stallAfterAiFinalHandled = false;
+    if (this.playbackEndTimeoutId !== null) {
+      clearTimeout(this.playbackEndTimeoutId);
+      this.playbackEndTimeoutId = null;
+    }
 
     // Prepare MediaSource for MP4/AAC if supported; else MP3; else Blob fallback
     if (this.retryStage === 2) {
@@ -278,6 +308,8 @@ export class TtsWsPlayer {
               } catch (error) {
                 this.handleError(error, "onFinal callback");
               }
+              // Set up fallback timer: if onended doesn't fire within reasonable time, trigger it manually
+              this.schedulePlaybackEndFallback();
             }
           } catch (e) {
             if (onLog) onLog(`TTS WS parse error: ${(e as Error).message}`);
@@ -480,6 +512,11 @@ export class TtsWsPlayer {
     }
   }
 
+  public markAiFinal(): void {
+    this.aiFinalReceived = true;
+  }
+
+
   private startRaf() {
     const an = this.analyserNode;
     if (!an) return;
@@ -522,6 +559,65 @@ export class TtsWsPlayer {
       } catch (error) {
         this.handleError(error, "mediaSource.endOfStream");
       }
+    }
+  }
+
+  private schedulePlaybackEndFallback() {
+    // Clear any existing timeout
+    if (this.playbackEndTimeoutId !== null) {
+      clearTimeout(this.playbackEndTimeoutId);
+      this.playbackEndTimeoutId = null;
+    }
+    // Schedule fallback: if onended doesn't fire within 2 seconds of stream end, trigger it manually
+    // This handles cases where MediaSource doesn't reliably fire onended
+    this.playbackEndTimeoutId = window.setTimeout(() => {
+      this.playbackEndTimeoutId = null;
+      if (!this.playbackEndedFired) {
+        const { onLog } = this.opts;
+        try {
+          // Check if playback is actually finished (paused or ended or near end)
+          const nearEnd = this.audioEl.duration > 0 && 
+                         (this.audioEl.ended || 
+                          this.audioEl.paused || 
+                          (this.audioEl.currentTime >= this.audioEl.duration - 0.5));
+          if (nearEnd || this.audioEl.ended) {
+            if (onLog) onLog("TTS WS: playback end fallback triggered (onended didn't fire)");
+            this.playbackEndedFired = true;
+            this.opts.onPlaybackEnded?.();
+          } else {
+            // Not done yet, reschedule
+            if (onLog) onLog(`TTS WS: playback end fallback delayed (currentTime=${this.audioEl.currentTime.toFixed(2)}, duration=${this.audioEl.duration.toFixed(2)})`);
+            this.schedulePlaybackEndFallback();
+          }
+        } catch (error) {
+          this.handleError(error, "playback end fallback check");
+        }
+      }
+    }, 2000);
+  }
+
+  private checkPlaybackCompletion() {
+    // Called from onstalled - check if we're done
+    if (this.playbackEndedFired) return;
+    try {
+      const streamEnded = this.mediaSource === null || 
+                         (this.mediaSource && this.mediaSource.readyState === "ended");
+      const nearEnd = this.audioEl.duration > 0 && 
+                     (this.audioEl.ended || 
+                      (this.audioEl.currentTime >= this.audioEl.duration - 0.5));
+      
+      if (streamEnded && nearEnd) {
+        const { onLog } = this.opts;
+        if (onLog) onLog("TTS WS: playback completion detected in onstalled");
+        this.playbackEndedFired = true;
+        if (this.playbackEndTimeoutId !== null) {
+          clearTimeout(this.playbackEndTimeoutId);
+          this.playbackEndTimeoutId = null;
+        }
+        this.opts.onPlaybackEnded?.();
+      }
+    } catch (error) {
+      this.handleError(error, "checkPlaybackCompletion");
     }
   }
 
@@ -585,8 +681,13 @@ export class TtsWsPlayer {
         }
       }
       this.objectUrl = null;
-      // Reset audio element
+      // Reset audio element - but only if not currently playing to avoid interfering with onended
+      // Note: pausing before playback ends will prevent onended from firing
       try {
+        const wasPlaying = !this.audioEl.paused && this.audioEl.currentTime > 0 && !this.audioEl.ended;
+        if (wasPlaying) {
+          this.opts.onLog?.("TTS WS: teardownMedia called while audio playing - pausing will prevent onended");
+        }
         this.audioEl.pause();
       } catch (error) {
         this.handleError(error, "audioEl.pause");

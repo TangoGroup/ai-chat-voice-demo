@@ -44,6 +44,8 @@ export interface VoiceMachineDeps {
   startCapture: () => void; // begin MediaRecorder for current utterance
   stopCapture: () => void; // stop MediaRecorder -> will emit RECORDING_STOPPED
   stopPlayback: () => void; // stop currently playing audio if any
+  startVAD: () => void; // start VAD pipeline
+  stopVAD: () => void; // stop VAD pipeline
 }
 
 function isProcessDoneEvent(event: unknown): event is DoneActorEvent<ProcessOutput> {
@@ -71,6 +73,8 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       startCapture: () => { d.log("machine: startCapture"); d.startCapture(); },
       stopCapture: () => { d.log("machine: stopCapture"); d.stopCapture(); },
       stopPlayback: () => { d.log("machine: stopPlayback"); d.stopPlayback(); },
+      startVAD: () => { d.log("machine: startVAD"); d.startVAD(); },
+      stopVAD: () => { d.log("machine: stopVAD"); d.stopVAD(); },
 
       // Context assignments
       storeRecordingBlob: assign(({ event }) => {
@@ -140,14 +144,19 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
           },
           listening_idle: {
             id: "control_listening_idle",
-            entry: ["startListeningInfra"],
+            entry: [
+              "startListeningInfra",
+              "startVAD",
+              () => { d.log("machine: entered listening_idle state"); },
+            ],
             on: {
-              STOP_ALL: { target: "ready", actions: "stopAll" },
+              STOP_ALL: { target: "ready", actions: ["stopAll", "stopVAD"] },
               // Ensure any residual playback (e.g., WS TTS) is stopped when user interrupts from idle
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture"] },
             },
           },
           capturing: {
+            // VAD is already active from listening_idle, stays active during capture
             initial: "recording",
             states: {
               recording: {
@@ -169,19 +178,30 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
               },
             },
             on: {
-              STOP_ALL: { target: "ready", actions: "stopAll" },
+              STOP_ALL: { target: "ready", actions: ["stopAll", "stopVAD"] },
               // Allow immediate retrigger during stopping to begin a new utterance
               VAD_SPEECH_START: { target: ".recording", actions: ["stopPlayback", "startCapture"] },
             },
           },
           processing: {
             id: "control_processing",
+            entry: ["stopVAD"],
             on: {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture"] },
               TTS_STARTED: { actions: "markStreamingOn" },
               TTS_ENDED: { actions: "markTtsDone" },
+              // Handle audio ending even if we're still processing (can happen with fast streaming)
+              AUDIO_ENDED: {
+                target: "listening_idle",
+                actions: [
+                  () => { 
+                    d.log("machine: AUDIO_ENDED received in processing state, transitioning to listening_idle");
+                  },
+                  "clearStreaming",
+                ],
+              },
             },
             invoke: {
               src: "processActor",
@@ -198,15 +218,28 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
           speaking_streaming: {
+            entry: ["stopVAD"],
             on: {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
               VAD_SPEECH_START: { target: "capturing", actions: ["stopPlayback", "startCapture", "clearStreaming"] },
               // When actual audio playback finishes, return immediately
-              AUDIO_ENDED: { target: "listening_idle", actions: "clearStreaming" },
+              AUDIO_ENDED: {
+                target: "listening_idle",
+                actions: [
+                  () => { 
+                    d.log("machine: AUDIO_ENDED event received in speaking_streaming state");
+                  },
+                  "clearStreaming",
+                  () => { 
+                    d.log("machine: transitioning from speaking_streaming to listening_idle");
+                  },
+                ],
+              },
             },
           },
           playing: {
+            entry: ["stopVAD"],
             on: {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },

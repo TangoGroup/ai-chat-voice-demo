@@ -36,6 +36,14 @@ const nextConfig: NextConfig = {
           { key: "Cross-Origin-Resource-Policy", value: "same-origin" },
         ],
       },
+      // Make sure .onnx files have the correct content type and CORP headers
+      {
+        source: "/:path*.onnx",
+        headers: [
+          { key: "Content-Type", value: "application/octet-stream" },
+          { key: "Cross-Origin-Resource-Policy", value: "same-origin" },
+        ],
+      },
     ];
   },
 };

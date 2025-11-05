@@ -1,7 +1,6 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
-import { speechFilter, preloadModel } from "@steelbrain/media-speech-detection-web";
-import { ingestAudioStream, RECOMMENDED_AUDIO_CONSTRAINTS } from "@steelbrain/media-ingest-audio";
+import { useVADSteelbrain } from "./useVADSteelbrain";
+import { useVADReact } from "./useVADReact";
 
 export interface VADCallbacks {
   onSpeechStart: () => void;
@@ -22,126 +21,60 @@ export interface VADResult {
   error: string | null;
 }
 
+export type VADImplementation = "steelbrain" | "vad-react";
+
 /**
- * Simple VAD hook: takes enabled flag and callbacks, returns stream + error
+ * Get the VAD implementation to use from environment variable or default
+ */
+function getVADImplementation(): VADImplementation {
+  if (typeof window === "undefined") {
+    // Server-side: default to steelbrain
+    return "steelbrain";
+  }
+  
+  // Check environment variable (defaults to steelbrain)
+  const envValue = process.env.NEXT_PUBLIC_VAD_IMPLEMENTATION;
+  if (envValue === "vad-react" || envValue === "react") {
+    return "vad-react";
+  }
+  return "steelbrain";
+}
+
+/**
+ * Unified VAD hook that proxies to either steelbrain or vad-react implementation
+ * 
+ * Switch implementations via NEXT_PUBLIC_VAD_IMPLEMENTATION environment variable:
+ * - "steelbrain" or unset: Uses @steelbrain/media-speech-detection-web (default)
+ * - "vad-react" or "react": Uses @ricky0123/vad-react with AudioContext support
+ * 
+ * Both implementations expose the same API for seamless switching.
  */
 export function useVAD(
   enabled: boolean,
   callbacks: VADCallbacks,
   options: VADOptions = {}
 ): VADResult {
-  const {
-    onSpeechStart,
-    onSpeechEnd,
-    onError,
-    log = () => {},
-    threshold = 0.45,
-    minSpeechDurationMs = 400,
-    redemptionDurationMs = 1400,
-    lookBackDurationMs = 384,
-  } = { ...callbacks, ...options };
-
-  const streamRef = useRef<MediaStream | null>(null);
-  const pipelineRef = useRef<Promise<void> | null>(null);
-  const aborterRef = useRef<AbortController | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // Store callbacks in refs to avoid dependency issues
-  const callbacksRef = useRef({ onSpeechStart, onSpeechEnd, onError, log });
-  useEffect(() => {
-    callbacksRef.current = { onSpeechStart, onSpeechEnd, onError, log };
-  }, [onSpeechStart, onSpeechEnd, onError, log]);
-
-  // Start VAD when enabled
-  useEffect(() => {
-    if (!enabled || typeof window === "undefined" || !navigator.mediaDevices) return;
-
-    let cancelled = false;
-
-    async function startVAD() {
-      try {
-        // Get mic stream
-        const stream = streamRef.current ?? await navigator.mediaDevices.getUserMedia({
-          audio: RECOMMENDED_AUDIO_CONSTRAINTS,
-          video: false
-        });
-        if (!streamRef.current) streamRef.current = stream;
-        stream.getAudioTracks().forEach((t) => { t.enabled = true; });
-
-        // Build pipeline once
-        if (!pipelineRef.current) {
-          const audioStream = await ingestAudioStream(stream);
-          const aborter = new AbortController();
-          aborterRef.current = aborter;
-
-          const vadTransform = speechFilter({
-            threshold,
-            minSpeechDurationMs,
-            redemptionDurationMs,
-            lookBackDurationMs,
-            noEmit: true,
-            onSpeechStart: () => {
-              if (!cancelled) {
-                callbacksRef.current.log("VAD: speech detected");
-                callbacksRef.current.onSpeechStart();
-              }
-            },
-            onSpeechEnd: () => {
-              if (!cancelled) {
-                callbacksRef.current.log("VAD: speech ended");
-                callbacksRef.current.onSpeechEnd();
-              }
-            },
-            onMisfire: () => callbacksRef.current.log("VAD: misfire"),
-            onError: (err: unknown) => {
-              const msg = err instanceof Error ? err.message : String(err);
-              callbacksRef.current.log(`VAD error: ${msg}`);
-              if (!cancelled) {
-                setError(msg);
-                callbacksRef.current.onError?.(msg);
-              }
-            },
-          });
-
-          pipelineRef.current = audioStream
-            .pipeThrough(vadTransform)
-            .pipeTo(new WritableStream<Float32Array>({ write() {} }), { signal: aborter.signal })
-            .catch(() => {});
-        }
-
-        callbacksRef.current.log("VAD started");
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        callbacksRef.current.log(`VAD failed: ${msg}`);
-        setError(msg);
-        callbacksRef.current.onError?.(msg);
-      }
-    }
-
-    startVAD();
-
-    return () => {
-      cancelled = true;
-      streamRef.current?.getAudioTracks().forEach((t) => { t.enabled = false; });
-    };
-  }, [enabled, threshold, minSpeechDurationMs, redemptionDurationMs, lookBackDurationMs]); // Removed callbacks from deps
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      aborterRef.current?.abort();
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-    };
-  }, []);
-
-  return { stream: streamRef.current, error };
+  const implementation = getVADImplementation();
+  
+  if (implementation === "vad-react") {
+    return useVADReact(enabled, callbacks, options);
+  }
+  
+  return useVADSteelbrain(enabled, callbacks, options);
 }
 
 /**
- * Preload VAD model (call once on mount)
+ * Preload VAD model (call once on mount for early initialization)
+ * Delegates to the appropriate implementation's preload function.
  */
 export async function preloadVAD(): Promise<void> {
-  if (typeof window === "undefined") return;
-  await preloadModel();
+  const implementation = getVADImplementation();
+  
+  if (implementation === "vad-react") {
+    const { preloadVADReact } = await import("./useVADReact");
+    return preloadVADReact();
+  }
+  
+  const { preloadVAD: preloadVADSteelbrain } = await import("./useVADSteelbrain");
+  return preloadVADSteelbrain();
 }
-

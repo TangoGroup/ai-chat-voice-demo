@@ -1,4 +1,4 @@
-import type { WaveformConfig } from "dot-sphere-visualizer";
+import type { WaveformConfig } from 'dot-sphere-visualizer';
 
 export type VoiceState = 'passive' | 'listening' | 'thinking' | 'speaking';
 
@@ -14,6 +14,7 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     volume: 0.2,
     radius: 1,
     pointSize: 0.016,
+    vertexCount: 4650,
     shellCount: 1,
     size: 1,
     opacity: 1,
@@ -57,7 +58,7 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     seed: 1,
     freezeTime: false,
     advanceCount: 0,
-    advanceAmount: 1/60,
+    advanceAmount: 1 / 60,
     blendingMode: 'normal',
     micEnvelope: 0,
     randomishMicModAmount: 0,
@@ -69,6 +70,7 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     volume: 0.2,
     radius: 1,
     pointSize: 0.016,
+    vertexCount: 4650,
     shellCount: 1,
     size: 1,
     opacity: 1,
@@ -112,7 +114,7 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     seed: 1,
     freezeTime: false,
     advanceCount: 0,
-    advanceAmount: 1/60,
+    advanceAmount: 1 / 60,
     blendingMode: 'normal',
     micEnvelope: 0,
     randomishMicModAmount: 2,
@@ -124,6 +126,7 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     volume: 0.2,
     radius: 1,
     pointSize: 0.016,
+    vertexCount: 4650,
     shellCount: 1,
     size: 0.72,
     opacity: 1,
@@ -167,7 +170,7 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     seed: 1,
     freezeTime: false,
     advanceCount: 0,
-    advanceAmount: 1/60,
+    advanceAmount: 1 / 60,
     blendingMode: 'normal',
     micEnvelope: 0,
     randomishMicModAmount: 2,
@@ -179,6 +182,7 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     volume: 0.2,
     radius: 1,
     pointSize: 0.016,
+    vertexCount: 4650,
     shellCount: 1,
     size: 1,
     opacity: 1,
@@ -222,7 +226,7 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     seed: 1,
     freezeTime: false,
     advanceCount: 0,
-    advanceAmount: 1/60,
+    advanceAmount: 1 / 60,
     blendingMode: 'normal',
     micEnvelope: 0,
     randomishMicModAmount: 1.5,
