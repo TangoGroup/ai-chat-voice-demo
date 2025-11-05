@@ -13,7 +13,7 @@
         "@radix-ui/react-slot": "^1.2.3",
         "@radix-ui/react-tooltip": "^1.2.8",
         "@react-three/fiber": "^9",
-        "@ricky0123/vad-react": "^0.0.34",
+        "@ricky0123/vad-react": "^0.0.35",
         "@steelbrain/media-ingest-audio": "^1.0.0",
         "@steelbrain/media-speech-detection-web": "^1.0.0",
         "@tanstack/react-query": "^5.90.2",
@@ -363,9 +363,9 @@
 
     "@react-three/postprocessing": ["@react-three/postprocessing@3.0.4", "", { "dependencies": { "maath": "^0.6.0", "n8ao": "^1.9.4", "postprocessing": "^6.36.6" }, "peerDependencies": { "@react-three/fiber": "^9.0.0", "react": "^19.0", "three": ">= 0.156.0" } }, "sha512-e4+F5xtudDYvhxx3y0NtWXpZbwvQ0x1zdOXWTbXMK6fFLVDd4qucN90YaaStanZGS4Bd5siQm0lGL/5ogf8iDQ=="],
 
-    "@ricky0123/vad-react": ["@ricky0123/vad-react@0.0.34", "", { "dependencies": { "@ricky0123/vad-web": "0.0.28", "onnxruntime-web": "^1.17.0" }, "peerDependencies": { "react": ">=16.8.0", "react-dom": ">=16.8.0" } }, "sha512-JfyRHlKM+owCWqjNer7L5yrqwHytvaEVlHLQkfx9Bg1mXVVfviwEe5E14jc24LzQf9UU/IFZz4zhIfRshCE0nA=="],
+    "@ricky0123/vad-react": ["@ricky0123/vad-react@0.0.35", "", { "dependencies": { "@ricky0123/vad-web": "0.0.29", "onnxruntime-web": "^1.17.0" }, "peerDependencies": { "react": ">=16.8.0", "react-dom": ">=16.8.0" } }, "sha512-hT8x5UJ+6sVXsl61VGZepomElTBINKMEtLRACjB98g30X0bJ3ILw41ifShe7WXuGA1uq7nr9sRJf9fDsrp1OVQ=="],
 
-    "@ricky0123/vad-web": ["@ricky0123/vad-web@0.0.28", "", { "dependencies": { "onnxruntime-web": "^1.17.0" } }, "sha512-Hvw8jN3r1SBxmjJa89HITxRcwlT6dc7CQPVtVQLrqfY8EeQcx41QeqKUol4lw8ZCeAIHKwYndHnB1K/4SAQJgQ=="],
+    "@ricky0123/vad-web": ["@ricky0123/vad-web@0.0.29", "", { "dependencies": { "onnxruntime-web": "^1.17.0" } }, "sha512-natq2FfiEdCv2LcXpmA+U5+wz7QoPgOe2QcwcehUIcFSfZrRnJVAC5H4MCL5Z2xOp7QK6nz53y/tyJLWFVx6TA=="],
 
     "@rollup/rollup-android-arm-eabi": ["@rollup/rollup-android-arm-eabi@4.52.4", "", { "os": "android", "cpu": "arm" }, "sha512-BTm2qKNnWIQ5auf4deoetINJm2JzvihvGb9R6K/ETwKLql/Bb3Eg2H1FBp1gUb4YGbydMA3jcmQTR73q7J+GAA=="],
 
