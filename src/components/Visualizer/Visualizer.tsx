@@ -64,9 +64,9 @@ export function Visualizer({ voiceState, inputStream }: { voiceState: VoiceState
         <ambientLight intensity={0.2} />
         <group position={[0, 0, 0]}>
           <SphereWaveform
-            volume={visualVolume}
             morph={morph}
             {...currentConfig}
+            volume={visualVolume}
             pointColor={displayPointColor}
             glowColor={displayGlowColor}
             micEnvelope={volume}
