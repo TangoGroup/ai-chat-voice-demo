@@ -444,6 +444,38 @@ export class TtsWsPlayer {
     }
   }
 
+  /**
+   * Immediately stop playback and fully recycle the audio component.
+   * Use for interrupts - stops audio immediately and cleans up all resources.
+   */
+  interrupt() {
+    const { onLog } = this.opts;
+    if (onLog) onLog(`TTS WS: interrupt() called - immediately stopping playback and recycling audio component`);
+    // Stop audio immediately
+    try {
+      this.audioEl.pause();
+      this.audioEl.currentTime = 0;
+    } catch (error) {
+      this.handleError(error, "audioEl.pause in interrupt");
+    }
+    // Close WebSocket
+    try {
+      this.ws?.close();
+    } catch (error) {
+      this.handleError(error, "WebSocket close in interrupt");
+    }
+    this.ws = null;
+    // Fully tear down media and audio analysis
+    this.teardownAudio("interrupt");
+    this.teardownMedia("interrupt");
+    // Clear playback state
+    this.playbackEndedFired = true;
+    if (this.playbackEndTimeoutId !== null) {
+      clearTimeout(this.playbackEndTimeoutId);
+      this.playbackEndTimeoutId = null;
+    }
+  }
+
   private enqueue(bytes: ArrayBuffer) {
     this.pendingChunks.push(bytes);
     this.drainQueue();

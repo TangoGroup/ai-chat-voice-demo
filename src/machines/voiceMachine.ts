@@ -46,6 +46,7 @@ export interface VoiceMachineDeps {
   stopPlayback: () => void; // stop currently playing audio if any
   startVAD: () => void; // start VAD pipeline
   stopVAD: () => void; // stop VAD pipeline
+  isInteractiveEnabled: () => boolean; // check if interactive mode is enabled
 }
 
 function isProcessDoneEvent(event: unknown): event is DoneActorEvent<ProcessOutput> {
@@ -75,6 +76,14 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
       stopPlayback: () => { d.log("machine: stopPlayback"); d.stopPlayback(); },
       startVAD: () => { d.log("machine: startVAD"); d.startVAD(); },
       stopVAD: () => { d.log("machine: stopVAD"); d.stopVAD(); },
+      stopVADIfNotInteractive: () => {
+        if (!d.isInteractiveEnabled()) {
+          d.log("machine: stopVAD (interactive disabled)");
+          d.stopVAD();
+        } else {
+          d.log("machine: keeping VAD active (interactive enabled)");
+        }
+      },
 
       // Context assignments
       storeRecordingBlob: assign(({ event }) => {
@@ -185,7 +194,7 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
           },
           processing: {
             id: "control_processing",
-            entry: ["stopVAD"],
+            entry: ["stopVADIfNotInteractive"],
             on: {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
@@ -218,7 +227,7 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
           speaking_streaming: {
-            entry: ["stopVAD"],
+            entry: ["stopVADIfNotInteractive"],
             on: {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },
@@ -239,7 +248,7 @@ export function createVoiceMachine(deps: VoiceMachineDeps) {
             },
           },
           playing: {
-            entry: ["stopVAD"],
+            entry: ["stopVADIfNotInteractive"],
             on: {
               // Stop entirely from any state
               STOP_ALL: { target: "ready", actions: ["stopAll", "clearStreaming"] },

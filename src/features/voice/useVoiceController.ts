@@ -19,6 +19,7 @@ export interface VoiceControllerConfig {
   onMessagesUpdate: (messages: ChatMessage[]) => void;
   onSendRef?: React.MutableRefObject<((event: { type: string; [k: string]: unknown }) => void) | null>;
   onIsRecordingChange?: (isRecording: boolean) => void;
+  interactiveEnabled?: boolean;
 }
 
 export type ControlState = "ready" | "listening_idle" | "capturing" | "processing" | "speaking_streaming" | "playing" | "error";
@@ -48,6 +49,7 @@ export function useVoiceController(config: VoiceControllerConfig): VoiceControll
     onMessagesUpdate,
     onSendRef,
     onIsRecordingChange,
+    interactiveEnabled = false,
   } = config;
 
   // Get shared AudioContext for VAD
@@ -76,6 +78,9 @@ export function useVoiceController(config: VoiceControllerConfig): VoiceControll
   useEffect(() => {
     onMessagesUpdateRef.current = onMessagesUpdate;
   }, [onMessagesUpdate]);
+  useEffect(() => {
+    interactiveEnabledRef.current = interactiveEnabled;
+  }, [interactiveEnabled]);
 
   // Recording functions
   const stopRecording = useCallback(() => {
@@ -103,6 +108,7 @@ export function useVoiceController(config: VoiceControllerConfig): VoiceControll
   const vadPipelineActiveRef = useRef<boolean>(false);
   const vadEnabledRef = useRef<boolean>(false);
   const vadAbortedRef = useRef<boolean>(false);
+  const interactiveEnabledRef = useRef<boolean>(interactiveEnabled);
   const [vadError, setVadError] = useState<string | null>(null);
 
   // Module-scoped preload promise
@@ -239,9 +245,22 @@ export function useVoiceController(config: VoiceControllerConfig): VoiceControll
         lookBackDurationMs: 384,
         noEmit: true,
         onSpeechStart: () => {
-          if (vadEnabledRef.current && !vadAbortedRef.current && sendRef.current) {
-            log("VAD: speech detected");
+          if (!vadEnabledRef.current || vadAbortedRef.current || !sendRef.current) return;
+          // In interactive mode, allow interrupt from any state
+          // Otherwise, only allow from listening_idle/capturing (handled by state machine)
+          if (interactiveEnabledRef.current) {
+            log("VAD: speech detected (interactive mode - interrupting)");
             sendRef.current({ type: "VAD_SPEECH_START" });
+          } else {
+            // Check current state - only dispatch if in listening_idle or capturing
+            const currentState = stateRef.current?.value;
+            const stateStr = typeof currentState === "string" ? currentState : (typeof currentState === "object" && currentState !== null ? Object.keys(currentState)[0] : "");
+            if (stateStr === "listening_idle" || stateStr === "capturing") {
+              log("VAD: speech detected");
+              sendRef.current({ type: "VAD_SPEECH_START" });
+            } else {
+              log(`VAD: speech detected but ignored (state=${stateStr}, interactive=${interactiveEnabledRef.current})`);
+            }
           }
         },
         onSpeechEnd: () => {
@@ -321,17 +340,37 @@ export function useVoiceController(config: VoiceControllerConfig): VoiceControll
   const stopCapture = useCallback(() => { stopRecording(); }, [stopRecording]);
 
   const stopPlayback = useCallback(() => {
+    log("stopPlayback: stopping playback and recycling audio component");
+    // Immediately interrupt and recycle TtsWsPlayer if it exists
+    if (ttsPlayerRef.current) {
+      try {
+        ttsPlayerRef.current.interrupt();
+      } catch (error) {
+        log(`stopPlayback: error interrupting TtsWsPlayer: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      ttsPlayerRef.current = null;
+    }
+    // Legacy audio element cleanup (for REST TTS path)
     if (currentAudioRef.current) {
-      try { currentAudioRef.current.pause(); } catch {}
+      try {
+        currentAudioRef.current.pause();
+        currentAudioRef.current.currentTime = 0;
+        currentAudioRef.current.src = "";
+        currentAudioRef.current.load();
+      } catch (error) {
+        log(`stopPlayback: error cleaning up audio element: ${error instanceof Error ? error.message : String(error)}`);
+      }
       currentAudioRef.current = null;
     }
     ttsSpeakingRef.current = false;
     try { ttsAbortRef.current?.abort(); } catch {}
     ttsAbortRef.current = null;
-    try { ttsPlayerRef.current?.close(); } catch {}
-    ttsPlayerRef.current = null;
-    if (ttsEndFallbackTimerRef.current !== null) { try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {} ttsEndFallbackTimerRef.current = null; }
-  }, []);
+    if (ttsEndFallbackTimerRef.current !== null) {
+      try { clearTimeout(ttsEndFallbackTimerRef.current); } catch {}
+      ttsEndFallbackTimerRef.current = null;
+    }
+    log("stopPlayback: playback stopped and audio component recycled");
+  }, [log]);
 
   const processPipeline = useCallback(async ({ blob }: { blob: Blob }) => {
     const sw = createStopwatch();
@@ -500,6 +539,7 @@ export function useVoiceController(config: VoiceControllerConfig): VoiceControll
     stopPlayback,
     startVAD,
     stopVAD,
+    isInteractiveEnabled: () => interactiveEnabledRef.current,
   }), [
     onStartListening,
     onStopAll,
@@ -520,6 +560,17 @@ export function useVoiceController(config: VoiceControllerConfig): VoiceControll
     const stateValue = typeof state.value === "string" ? state.value : JSON.stringify(state.value);
     log(`machine state changed: ${stateValue}`);
   }, [state.value, log]);
+
+  // Restart VAD when interactive mode is enabled and we're in a state that needs it
+  useEffect(() => {
+    if (!interactiveEnabled) return;
+    const stateValue = typeof state.value === "string" ? state.value : (typeof state.value === "object" && state.value !== null ? Object.keys(state.value)[0] : "");
+    const needsVAD = stateValue === "processing" || stateValue === "speaking_streaming" || stateValue === "playing";
+    if (needsVAD && !vadPipelineActiveRef.current && !vadAbortedRef.current) {
+      log("VAD: restarting for interactive mode");
+      void startVAD();
+    }
+  }, [interactiveEnabled, state.value, log, startVAD]);
 
   // Store send in ref for use in callbacks (needed because processPipeline is created before send exists)
   useEffect(() => {

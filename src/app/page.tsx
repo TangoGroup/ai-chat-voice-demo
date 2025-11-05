@@ -76,9 +76,6 @@ export default function Home() {
 
   // Refs for state management
   const sendRef = useRef<((event: { type: string; [k: string]: unknown }) => void) | null>(null);
-  const interactiveEnabledRef = useRef<boolean>(false);
-  const isRecordingRef = useRef<boolean>(false);
-  const isListeningRef = useRef<boolean>(false);
   const vadStreamRef = useRef<MediaStream | null>(null);
 
   // Voice controller handles all internal refs, recording, TTS, AI streaming, and VAD
@@ -91,6 +88,7 @@ export default function Home() {
     onMessagesUpdate: setMessages,
     onSendRef: sendRef,
     onIsRecordingChange: setIsRecording,
+    interactiveEnabled,
   });
 
   // Extract top-level state name (XState v5 uses objects for nested states like { capturing: "recording" })
@@ -135,10 +133,6 @@ export default function Home() {
 
   // Compute visual state from machine state
   const visualState = getVisualState(topLevelState as ControlState);
-
-  // Track latest listening state and interactive toggle for VAD gating
-  useEffect(() => { isListeningRef.current = (topLevelState === "listening_idle" || topLevelState === "capturing"); }, [topLevelState]);
-  useEffect(() => { interactiveEnabledRef.current = interactiveEnabled; }, [interactiveEnabled]);
 
   // Manual input: send text to AI SSE and stream tokens into WS TTS (skip STT)
   const manualSpeak = useCallback(async (text: string) => {
