@@ -361,47 +361,51 @@ export function useVoiceController(config: VoiceControllerConfig): VoiceControll
 
     try { ttsAbortRef.current?.abort(); } catch {}
     ttsAbortRef.current = null;
-    try { ttsPlayerRef.current?.close(); } catch {}
-    ttsPlayerRef.current = null;
     try { aiAbortRef.current?.abort(); } catch {}
     aiAbortRef.current = null;
 
-    const player = new TtsWsPlayer({
-      apiKey,
-      voiceId,
-      modelId,
-      chunkLengthSchedule: [80, 120, 180, 240],
-      onLog: logFiltered,
-      onVolume: () => {},
-      onFirstAudio: () => {
-        ttsSpeakingRef.current = true;
-        try { if (sendRef.current) sendRef.current({ type: "TTS_STARTED" }); } catch {}
-      },
-      onFinal: () => {
-        ttsSpeakingRef.current = false;
-        try { if (sendRef.current) sendRef.current({ type: "TTS_ENDED" }); } catch {}
-      },
-      onPlaybackEnded: () => {
-        const currentStateValue = stateRef.current 
-          ? (typeof stateRef.current.value === "string" 
-              ? stateRef.current.value 
-              : JSON.stringify(stateRef.current.value))
-          : "unknown";
-        log(`TTS playback ended -> AUDIO_ENDED (current machine state: ${currentStateValue})`);
-        if (!sendRef.current) {
-          log("ERROR: sendRef.current is null, cannot dispatch AUDIO_ENDED");
-          return;
-        }
-        try {
-          const event = { type: "AUDIO_ENDED" as const };
-          log(`Dispatching AUDIO_ENDED event: ${JSON.stringify(event)}`);
-          sendRef.current(event);
-          log("AUDIO_ENDED dispatched successfully");
-        } catch (error) {
-          log(`ERROR dispatching AUDIO_ENDED: ${String(error)}`);
-        }
-      },
-    });
+    // Reuse existing player or create one if it doesn't exist
+    // This ensures we reuse the same Audio element, preventing lost references
+    let player = ttsPlayerRef.current;
+    if (!player) {
+      player = new TtsWsPlayer({
+        apiKey,
+        voiceId,
+        modelId,
+        chunkLengthSchedule: [80, 120, 180, 240],
+        onLog: logFiltered,
+        onVolume: () => {},
+        onFirstAudio: () => {
+          ttsSpeakingRef.current = true;
+          try { if (sendRef.current) sendRef.current({ type: "TTS_STARTED" }); } catch {}
+        },
+        onFinal: () => {
+          ttsSpeakingRef.current = false;
+          try { if (sendRef.current) sendRef.current({ type: "TTS_ENDED" }); } catch {}
+        },
+        onPlaybackEnded: () => {
+          const currentStateValue = stateRef.current 
+            ? (typeof stateRef.current.value === "string" 
+                ? stateRef.current.value 
+                : JSON.stringify(stateRef.current.value))
+            : "unknown";
+          log(`TTS playback ended -> AUDIO_ENDED (current machine state: ${currentStateValue})`);
+          if (!sendRef.current) {
+            log("ERROR: sendRef.current is null, cannot dispatch AUDIO_ENDED");
+            return;
+          }
+          try {
+            const event = { type: "AUDIO_ENDED" as const };
+            log(`Dispatching AUDIO_ENDED event: ${JSON.stringify(event)}`);
+            sendRef.current(event);
+            log("AUDIO_ENDED dispatched successfully");
+          } catch (error) {
+            log(`ERROR dispatching AUDIO_ENDED: ${String(error)}`);
+          }
+        },
+      });
+      ttsPlayerRef.current = player;
+    }
 
     try {
       await player.connect();
@@ -415,7 +419,6 @@ export function useVoiceController(config: VoiceControllerConfig): VoiceControll
 
     const ttsAborter = new AbortController();
     ttsAbortRef.current = ttsAborter;
-    ttsPlayerRef.current = player;
 
     const currentMessages = messagesRef.current;
     const seedBase: ReadonlyArray<ChatMessage> = currentMessages.length === 0 ? [{ role: "system", content: "" }] : [];

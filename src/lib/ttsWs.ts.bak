@@ -62,7 +62,6 @@ export class TtsWsPlayer {
   private playbackEndTimeoutId: number | null = null;
   private aiFinalReceived = false;
   private stallAfterAiFinalHandled = false;
-  private streamEndRequested = false;
 
   constructor(private readonly opts: TtsWsPlayerOptions) {
     this.audioEl = new Audio();
@@ -89,11 +88,7 @@ export class TtsWsPlayer {
           this.playbackEndTimeoutId = null;
         }
         this.opts.onLog?.("TTS WS: audioEl.onended fired");
-        this.opts.onLog?.("TTS WS: calling onPlaybackEnded callback");
         this.opts.onPlaybackEnded?.();
-        this.opts.onLog?.("TTS WS: onPlaybackEnded callback completed");
-        // Now safe to tear down media since playback is done
-        this.teardownMedia("onended");
       } catch (error) {
         this.handleError(error, "audioEl.onended callback");
       }
@@ -116,26 +111,12 @@ export class TtsWsPlayer {
     this.audioEl.onstalled = () => {
       try {
         this.opts.onLog?.("TTS WS: audioEl stalled");
+        // Check if stream has ended and we're near the end of playback
+        this.checkPlaybackCompletion();
       } catch (error) {
         this.handleError(error, "audioEl.onstalled callback");
       }
     };
-    // Track audio playback progress
-    this.audioEl.ontimeupdate = () => {
-      try {
-        const { onLog } = this.opts;
-        if (onLog && this.audioEl.duration > 0) {
-          const progress = (this.audioEl.currentTime / this.audioEl.duration) * 100;
-          // Log when near end or when stopped
-          if (this.audioEl.ended || progress > 95 || (this.audioEl.paused && this.audioEl.currentTime > 0)) {
-            this.opts.onLog?.(`TTS WS: audioEl timeupdate - currentTime=${this.audioEl.currentTime.toFixed(2)}, duration=${this.audioEl.duration.toFixed(2)}, ended=${this.audioEl.ended}, paused=${this.audioEl.paused}, progress=${progress.toFixed(1)}%`);
-          }
-        }
-      } catch (error) {
-        this.handleError(error, "audioEl.ontimeupdate callback");
-      }
-    };
-
   }
 
   private handleError(error: unknown, context?: string): void {
@@ -169,7 +150,6 @@ export class TtsWsPlayer {
     this.playbackEndedFired = false;
     this.aiFinalReceived = false;
     this.stallAfterAiFinalHandled = false;
-    this.streamEndRequested = false;
     if (this.playbackEndTimeoutId !== null) {
       clearTimeout(this.playbackEndTimeoutId);
       this.playbackEndTimeoutId = null;
@@ -231,18 +211,6 @@ export class TtsWsPlayer {
               this.isBufferUpdating = false;
               this.drainQueue();
             });
-            this.mediaSource.addEventListener("sourceended", () => {
-              const { onLog: logFn } = this.opts;
-              if (logFn) logFn(`TTS WS: MediaSource sourceended event fired (audioEl.ended=${this.audioEl.ended}, currentTime=${this.audioEl.currentTime.toFixed(2)}, duration=${this.audioEl.duration.toFixed(2)})`);
-              // Browser quirk: When MediaSource ends, audioEl.ended might be true but onended might not fire
-              // Check if audio has already ended and manually trigger if needed
-              if (this.audioEl.ended && !this.playbackEndedFired) {
-                if (logFn) logFn("TTS WS: audioEl already ended when MediaSource ended, but onended didn't fire - manually triggering");
-                this.playbackEndedFired = true;
-                this.opts.onPlaybackEnded?.();
-              }
-              // Otherwise, audio element will naturally fire onended when playback finishes
-            });
             resolve();
           } catch (e) {
             if (onLog) onLog(`TTS WS: failed to add SourceBuffer (${(this.chosenSourceBufferMime ?? "unknown")}): ${(e as Error).message}`);
@@ -287,7 +255,6 @@ export class TtsWsPlayer {
           try {
             if (typeof ev.data !== "string") return; // server sends text frames with json
             const payload = JSON.parse(ev.data) as { audio?: string; isFinal?: boolean; alignment?: unknown };
-            if (onLog) onLog(`TTS WS <- message: audio=${!!payload.audio}, isFinal=${!!payload.isFinal}`);
             if (payload.audio) {
               const bytes = base64ToArrayBuffer(payload.audio);
               if (this.useBlobFallback) {
@@ -322,22 +289,8 @@ export class TtsWsPlayer {
               // suppress per-chunk logs for noise reduction
             }
             if (payload.isFinal) {
-              if (onLog) onLog(`TTS WS: final message received (pendingChunks=${this.pendingChunks.length}, isBufferUpdating=${this.isBufferUpdating})`);
-              this.aiFinalReceived = true;
-              // Request stream end, but wait for queue to drain
-              if (this.useBlobFallback) {
-                if (onLog) onLog("TTS WS: calling endOfStream() immediately (blob fallback)");
-                this.endOfStream();
-              } else {
-                this.streamEndRequested = true;
-                if (onLog) onLog(`TTS WS: streamEndRequested=true, pendingChunks=${this.pendingChunks.length}, isBufferUpdating=${this.isBufferUpdating}`);
-                if (this.pendingChunks.length === 0 && !this.isBufferUpdating) {
-                  if (onLog) onLog("TTS WS: queue empty, calling drainQueue() to trigger endOfStream");
-                  this.drainQueue(); // This will trigger the endOfStream call
-                } else {
-                  if (onLog) onLog(`TTS WS: waiting for queue to drain (pendingChunks=${this.pendingChunks.length}, isBufferUpdating=${this.isBufferUpdating})`);
-                }
-              }
+              if (onLog) onLog("TTS WS: final message received");
+              this.endOfStream();
               if (this.useBlobFallback && this.fallbackChunks.length > 0) {
                 const mime = (this.chosenSourceBufferMime && this.chosenSourceBufferMime.startsWith("audio/mp4")) ? "audio/mp4" : "audio/mpeg";
                 try {
@@ -351,12 +304,12 @@ export class TtsWsPlayer {
                 }
               }
               try {
-                if (onLog) onLog("TTS WS: calling onFinal callback");
                 this.opts.onFinal?.();
-                if (onLog) onLog("TTS WS: onFinal callback completed");
               } catch (error) {
                 this.handleError(error, "onFinal callback");
               }
+              // Set up fallback timer: if onended doesn't fire within reasonable time, trigger it manually
+              this.schedulePlaybackEndFallback();
             }
           } catch (e) {
             if (onLog) onLog(`TTS WS parse error: ${(e as Error).message}`);
@@ -367,7 +320,6 @@ export class TtsWsPlayer {
         };
         ws.onclose = (ev) => {
           if (onLog) onLog(`TTS WS closed (code=${ev.code} reason="${ev.reason}")`);
-          if (onLog) onLog(`TTS WS: ws.onclose calling endOfStream() (mediaSource=${!!this.mediaSource}, readyState=${this.mediaSource?.readyState})`);
           this.endOfStream();
           // Only auto-retry if not an intentional client close
           const intentional = ev.code === 1000 && ev.reason === "client_end";
@@ -409,29 +361,21 @@ export class TtsWsPlayer {
   }
 
   close() {
-    const { onLog } = this.opts;
-    if (onLog) onLog(`TTS WS: close() called (aiFinalReceived=${this.aiFinalReceived}, mediaSource=${!!this.mediaSource}, readyState=${this.mediaSource?.readyState})`);
     try {
       this.ws?.close();
     } catch (error) {
       this.handleError(error, "WebSocket close");
     }
     this.ws = null;
-    // End the stream so no more data comes, but DON'T tear down media yet
-    // Let audio finish playing naturally so onended can fire
     this.endOfStream();
-    // Only tear down audio analysis (stop RAF)
     this.teardownAudio("close");
-    // Don't call teardownMedia here - let audio finish and onended will handle cleanup
-    // If audio is already done, teardownMedia will be called from onended handler
+    this.teardownMedia("close");
   }
 
   /**
    * Immediately finalize playback and close the WS. Use when upstream SSE completes.
    */
   endSession() {
-    const { onLog } = this.opts;
-    if (onLog) onLog(`TTS WS: endSession() called (aiFinalReceived=${this.aiFinalReceived}, mediaSource=${!!this.mediaSource}, readyState=${this.mediaSource?.readyState})`);
     try {
       this.endOfStream();
     } catch (error) {
@@ -452,23 +396,7 @@ export class TtsWsPlayer {
   private drainQueue() {
     if (!this.sourceBuffer || this.isBufferUpdating) return;
     const next = this.pendingChunks.shift();
-    if (!next) {
-      // Queue is empty - if we've requested stream end, do it now
-      const { onLog } = this.opts;
-      if (onLog) onLog(`TTS WS: drainQueue() - queue empty (streamEndRequested=${this.streamEndRequested}, mediaSource=${!!this.mediaSource}, readyState=${this.mediaSource?.readyState})`);
-      if (this.streamEndRequested && this.mediaSource && this.mediaSource.readyState === "open") {
-        try {
-          if (onLog) onLog("TTS WS: calling mediaSource.endOfStream()");
-          this.mediaSource.endOfStream();
-          if (onLog) onLog(`TTS WS: mediaSource.endOfStream() completed (readyState=${this.mediaSource.readyState})`);
-          this.streamEndRequested = false;
-          this.opts.onLog?.("TTS WS: MediaSource.endOfStream() called after queue drained");
-        } catch (error) {
-          this.handleError(error, "mediaSource.endOfStream after drain");
-        }
-      }
-      return;
-    }
+    if (!next) return;
     try {
       this.isBufferUpdating = true;
       this.sourceBuffer.appendBuffer(next);
@@ -621,8 +549,6 @@ export class TtsWsPlayer {
   }
 
   private endOfStream() {
-    const { onLog } = this.opts;
-    if (onLog) onLog(`TTS WS: endOfStream() called (rafId=${!!this.rafId}, mediaSource=${!!this.mediaSource}, readyState=${this.mediaSource?.readyState})`);
     if (this.rafId) {
       try {
         cancelAnimationFrame(this.rafId);
@@ -634,8 +560,6 @@ export class TtsWsPlayer {
     if (this.mediaSource && this.mediaSource.readyState === "open") {
       try {
         this.mediaSource.endOfStream();
-        // MediaSource will transition to "ended" and fire sourceended event
-        // Audio element will naturally fire onended when playback finishes
       } catch (error) {
         this.handleError(error, "mediaSource.endOfStream");
       }
@@ -747,10 +671,6 @@ export class TtsWsPlayer {
         try {
           if (this.mediaSource.readyState === "open") {
             this.mediaSource.endOfStream();
-            const { onLog: logFn } = this.opts;
-            if (logFn) logFn(`TTS WS: mediaSource.endOfStream() completed (readyState=${this.mediaSource.readyState})`);
-            // MediaSource will transition to ended, which triggers sourceended event
-            // The sourceended handler will check if audio is done
           }
         } catch (error) {
           this.handleError(error, "mediaSource.endOfStream in teardownMedia");

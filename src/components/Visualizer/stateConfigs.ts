@@ -9,14 +9,21 @@ export const BASE_PERSISTENT = {
   // We implement high "scale value" by using higher sineScale / surface dynamics
 } as const;
 
+const VERTEX_COUNT = 1400;
+const POINT_SIZE = 0.01;
+const SIZE = 0.9;
+const MASK_RADIUS = 0.8;
+const MASK_FEATHER = 0.4;
+const MASK_INVERT = false;
+
 export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
   passive: {
     volume: 0.2,
     radius: 1,
-    pointSize: 0.016,
-    vertexCount: 4650,
+    pointSize: POINT_SIZE,
+    vertexCount: VERTEX_COUNT,
     shellCount: 1,
-    size: 1,
+    size: SIZE,
     opacity: 1,
     rotationX: 0,
     rotationY: 0,
@@ -36,9 +43,9 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     spinSpeed: 0.05,
     spinAxisX: 24,
     spinAxisY: 35,
-    maskRadius: 0.5,
-    maskFeather: 0.2,
-    maskInvert: false,
+    maskRadius: MASK_RADIUS,
+    maskFeather: MASK_FEATHER,
+    maskInvert: MASK_INVERT,
     pointColor: '#171717',
     gradientColor2: '#ffffff',
     gradientAngle: 0,
@@ -69,10 +76,10 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
   listening: {
     volume: 0.2,
     radius: 1,
-    pointSize: 0.016,
-    vertexCount: 4650,
+    pointSize: POINT_SIZE,
+    vertexCount: VERTEX_COUNT,
     shellCount: 1,
-    size: 1,
+    size: SIZE,
     opacity: 1,
     rotationX: 0,
     rotationY: 0,
@@ -92,9 +99,9 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     spinSpeed: 0.15,
     spinAxisX: 24,
     spinAxisY: 35,
-    maskRadius: 0.5,
-    maskFeather: 0.2,
-    maskInvert: false,
+    maskRadius: MASK_RADIUS,
+    maskFeather: MASK_FEATHER,
+    maskInvert: MASK_INVERT,
     pointColor: '#171717',
     gradientColor2: '#ffffff',
     gradientAngle: 0,
@@ -125,10 +132,10 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
   thinking: {
     volume: 0.2,
     radius: 1,
-    pointSize: 0.016,
-    vertexCount: 4650,
+    pointSize: POINT_SIZE,
+    vertexCount: VERTEX_COUNT,
     shellCount: 1,
-    size: 0.72,
+    size: SIZE,
     opacity: 1,
     rotationX: 0,
     rotationY: 0,
@@ -148,9 +155,9 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     spinSpeed: 1,
     spinAxisX: 47,
     spinAxisY: 35,
-    maskRadius: 0.5,
-    maskFeather: 0.2,
-    maskInvert: false,
+    maskRadius: MASK_RADIUS,
+    maskFeather: MASK_FEATHER,
+    maskInvert: MASK_INVERT,
     pointColor: '#171717',
     gradientColor2: '#ffffff',
     gradientAngle: 0,
@@ -181,10 +188,10 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
   speaking: {
     volume: 0.2,
     radius: 1,
-    pointSize: 0.016,
-    vertexCount: 4650,
+    pointSize: POINT_SIZE,
+    vertexCount: VERTEX_COUNT,
     shellCount: 1,
-    size: 1,
+    size: SIZE,
     opacity: 1,
     rotationX: 0,
     rotationY: 0,
@@ -204,9 +211,9 @@ export const STATE_CONFIGS: Record<VoiceState, StateConfig> = {
     spinSpeed: 0.25,
     spinAxisX: 24,
     spinAxisY: 35,
-    maskRadius: 0.5,
-    maskFeather: 0.2,
-    maskInvert: false,
+    // maskRadius: 0.5,
+    // maskFeather: 0.2,
+    // maskInvert: false,
     pointColor: '#171717',
     gradientColor2: '#ffffff',
     gradientAngle: 0,
